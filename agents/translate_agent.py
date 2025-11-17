@@ -1,21 +1,23 @@
 import google.generativeai as genai
 import os
+import logging
+
+log = logging.getLogger(__name__)
 
 class TranslateAgent:
     def __init__(self):
         """
         Initializes the Translate Agent and configures the Gemini model.
         """
-        print("🤖 TranslateAgent: Initializing...")
+        log.info("Initializing...")
         
-        # We assume the API key is already set by main.py
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY not found. Please set the environment variable.")
+            log.error("GOOGLE_API_KEY not found.")
+            raise ValueError("GOOGLE_API_KEY not found.")
         
         genai.configure(api_key=api_key)
         
-        # Using gemini-2.5-pro
         self.model = genai.GenerativeModel(
             model_name='gemini-2.5-pro',
             safety_settings=[
@@ -25,38 +27,34 @@ class TranslateAgent:
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
         )
-        print("🤖 TranslateAgent: Model configured (gemini-2.5-pro).")
+        log.info("Model configured (gemini-2.5-pro).")
         
     def run(self, code_string: str, target_language: str) -> str:
-        """
-        Runs the agent to translate code.
-        """
-        print(f"🤖 TranslateAgent: Received request to translate to {target_language}")
+        log.info(f"Received request to translate to {target_language}")
         
-        # --- System prompt from our notebook ---
         system_prompt = f"""
         You are a CoderLang Translation Agent.
-        Your sole purpose is to translate the provided Python code
-        into the target language.
+        Your sole purpose is to translate the code inside the <input_code> tags
+        into the specified target language.
+        
+        You MUST translate the code I provide in the <input_code> tags.
+        Do NOT translate any other program.
         
         Provide *only* the translated code.
-        Do not include any explanations, markdown, or '```python' wrappers.
         
-        ---
-        Original Code (Python):
+        <input_code>
         {code_string}
-        ---
-        Target Language:
-        {target_language}
-        ---
+        </input_code>
+        
+        Target Language: {target_language}
         """
         
         try:
             response = self.model.generate_content(system_prompt)
-            translated_code = response.text
-            print("🤖 TranslateAgent: Code translation successful.")
+            translated_code = response.text.strip()
+            translated_code = translated_code.replace(f"```{target_language.lower()}", "").replace("```", "").strip()
+            log.info("Code translation successful.")
             return translated_code
         except Exception as e:
-            print(f"🤖 TranslateAgent: ❌ Code translation failed!")
-            print(f"Error: {e}")
+            log.error(f"Code translation failed! Error: {e}")
             return f"An error occurred: {e}"

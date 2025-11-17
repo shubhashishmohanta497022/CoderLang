@@ -1,16 +1,20 @@
 import google.generativeai as genai
 import os
+import logging
+
+log = logging.getLogger(__name__)
 
 class TestGeneratorAgent:
     def __init__(self):
         """
         Initializes the Test Generator Agent and configures the Gemini model.
         """
-        print("🤖 TestGeneratorAgent: Initializing...")
+        log.info("Initializing...")
         
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY not found. Please set the environment variable.")
+            log.error("GOOGLE_API_KEY not found.")
+            raise ValueError("GOOGLE_API_KEY not found.")
         
         genai.configure(api_key=api_key)
         
@@ -23,33 +27,31 @@ class TestGeneratorAgent:
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
         )
-        print("🤖 TestGeneratorAgent: Model configured (gemini-2.5-pro).")
+        log.info("Model configured (gemini-2.5-pro).")
         
     def run(self, code_string: str) -> str:
-        """
-        Runs the agent to generate unit tests for the given code.
-        """
-        print(f"🤖 TestGeneratorAgent: Received request to generate tests.")
+        log.info("Received request to generate tests.")
         
-        # --- System prompt from our notebook ---
         system_prompt = f"""
         You are a Test Generator Agent.
-        Your sole purpose is to write clear, concise, and effective 
-        `pytest` compatible unit tests for the following Python code.
+        Your sole purpose is to write `pytest` tests for the code inside the <input_code> tags.
         
-        Provide *only* the Python code for the tests.
-        Do not include any explanations, markdown, or '```python' wrappers.
+        You MUST write tests for the code I provide in the <input_code> tags.
+        Do NOT write tests for any other program.
         
-        Code to test:
+        Provide *only* the Python code for the tests. No markdown.
+        
+        <input_code>
         {code_string}
+        </input_code>
         """
         
         try:
             response = self.model.generate_content(system_prompt)
             unit_tests = response.text
-            print("🤖 TestGeneratorAgent: Test generation successful.")
+            unit_tests = unit_tests.strip().replace("```python", "").replace("```", "").strip()
+            log.info("Test generation successful.")
             return unit_tests
         except Exception as e:
-            print(f"🤖 TestGeneratorAgent: ❌ Test generation failed!")
-            print(f"Error: {e}")
+            log.error(f"Test generation failed! Error: {e}")
             return f"An error occurred: {e}"

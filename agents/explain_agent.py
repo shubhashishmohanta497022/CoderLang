@@ -1,16 +1,20 @@
 import google.generativeai as genai
 import os
+import logging
+
+log = logging.getLogger(__name__)
 
 class ExplainAgent:
     def __init__(self):
         """
         Initializes the Explain Agent and configures the Gemini model.
         """
-        print("🤖 ExplainAgent: Initializing...")
+        log.info("Initializing...")
         
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY not found. Please set the environment variable.")
+            log.error("GOOGLE_API_KEY not found.")
+            raise ValueError("GOOGLE_API_KEY not found.")
         
         genai.configure(api_key=api_key)
         
@@ -23,35 +27,29 @@ class ExplainAgent:
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
         )
-        print("🤖 ExplainAgent: Model configured (gemini-2.5-pro).")
+        log.info("Model configured (gemini-2.5-pro).")
         
     def run(self, code_string: str) -> str:
-        """
-        Runs the agent to explain the given code.
-        """
-        print(f"🤖 ExplainAgent: Received request to explain code.")
+        log.info("Received request to explain code.")
         
-        # --- System prompt from our notebook ---
         system_prompt = f"""
-        You are a CoderLang Explanation Agent, a friendly coding tutor.
-        Your sole purpose is to explain the provided code in a simple,
-        clear, and concise way.
+        You are a CoderLang Explanation Agent.
+        Your sole purpose is to explain the code inside the <input_code> tags.
         
-        Do not just describe the code line-by-line. Explain
-        what the code *does* and *how it works* at a high level.
+        You MUST explain the code I provide in the <input_code> tags.
+        Do NOT explain any other program.
         
-        ---
-        Code:
+        <input_code>
         {code_string}
-        ---
+        </input_code>
         """
         
         try:
+            # We use the [system, user] message format for this one
             response = self.model.generate_content(system_prompt)
-            explanation = response.text
-            print("🤖 ExplainAgent: Explanation successful.")
+            explanation = response.text.strip()
+            log.info("Explanation successful.")
             return explanation
         except Exception as e:
-            print(f"🤖 ExplainAgent: ❌ Explanation failed!")
-            print(f"Error: {e}")
+            log.error(f"Explanation failed! Error: {e}")
             return f"An error occurred: {e}"

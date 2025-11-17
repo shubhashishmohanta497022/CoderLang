@@ -1,23 +1,24 @@
 import google.generativeai as genai
 import os
+import logging # --- 1. Import logging ---
+
+# --- 2. Get a logger for this specific file ---
+log = logging.getLogger(__name__)
 
 class CodingAgent:
     def __init__(self):
         """
         Initializes the Coding Agent and configures the Gemini model.
         """
-        print("🤖 CodingAgent: Initializing...")
+        log.info("Initializing...") # --- 3. Change 'print' to 'log.info' ---
         
-        # We need to configure the API key. 
-        # This will be loaded by main.py
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY not found. Please set the environment variable.")
+            log.error("GOOGLE_API_KEY not found.") # --- Use 'log.error' for problems ---
+            raise ValueError("GOOGLE_API_KEY not found.")
         
         genai.configure(api_key=api_key)
         
-        # --- Copied from our notebook ---
-        # Using gemini-2.5-pro as you selected
         self.model = genai.GenerativeModel(
             model_name='gemini-2.5-pro',
             safety_settings=[
@@ -27,19 +28,21 @@ class CodingAgent:
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
         )
-        print("🤖 CodingAgent: Model configured (gemini-2.5-pro).")
+        log.info("Model configured (gemini-2.5-pro).")
         
     def run(self, prompt: str) -> str:
         """
         Runs the agent on a given prompt to generate code.
         """
-        print(f"🤖 CodingAgent: Received prompt: {prompt}")
+        log.info(f"Received prompt: {prompt}")
         
-        # --- This is our perfected system prompt ---
         system_prompt = f"""
         You are a CoderLang Coding Agent.
         Your sole purpose is to write clean, effective, and correct 
         Python code based on a user's request.
+        
+        You MUST follow all Python syntax rules and standard PEP 8
+        style guides. Pay close attention to indentation.
         
         Provide *only* the Python code.
         Do not include any explanations, markdown, or '```python' wrappers.
@@ -50,9 +53,8 @@ class CodingAgent:
         try:
             response = self.model.generate_content(system_prompt)
             generated_code = response.text
-            print("🤖 CodingAgent: Code generation successful.")
+            log.info("Code generation successful.")
             return generated_code
         except Exception as e:
-            print(f"🤖 CodingAgent: ❌ Code generation failed!")
-            print(f"Error: {e}")
+            log.error(f"Code generation failed! Error: {e}") # --- Use 'log.error' ---
             return f"An error occurred: {e}"
