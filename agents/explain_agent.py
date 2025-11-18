@@ -32,21 +32,29 @@ class ExplainAgent:
     def run(self, code_string: str) -> str:
         log.info("Received request to explain code.")
         
-        system_prompt = f"""
+        system_instructions = """
         You are a CoderLang Explanation Agent.
         Your sole purpose is to explain the code inside the <input_code> tags.
         
         You MUST explain the code I provide in the <input_code> tags.
         Do NOT explain any other program.
+        """
         
+        user_message = f"""
         <input_code>
         {code_string}
         </input_code>
         """
         
+        # --- THE FIX ---
+        messages = [
+            {'role': 'user', 'parts': [system_instructions]},
+            {'role': 'model', 'parts': ["OK. I am ready to explain the code you provide."]},
+            {'role': 'user', 'parts': [user_message]}
+        ]
+        
         try:
-            # We use the [system, user] message format for this one
-            response = self.model.generate_content(system_prompt)
+            response = self.model.generate_content(messages)
             explanation = response.text.strip()
             log.info("Explanation successful.")
             return explanation

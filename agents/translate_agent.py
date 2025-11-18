@@ -32,7 +32,8 @@ class TranslateAgent:
     def run(self, code_string: str, target_language: str) -> str:
         log.info(f"Received request to translate to {target_language}")
         
-        system_prompt = f"""
+        # --- FIX: 1. System instructions are separated ---
+        system_instructions = f"""
         You are a CoderLang Translation Agent.
         Your sole purpose is to translate the code inside the <input_code> tags
         into the specified target language.
@@ -41,16 +42,25 @@ class TranslateAgent:
         Do NOT translate any other program.
         
         Provide *only* the translated code.
+        """
         
+        # --- FIX: 2. User message contains all data parts ---
+        user_message = f"""
         <input_code>
         {code_string}
         </input_code>
         
         Target Language: {target_language}
         """
-        
+
         try:
-            response = self.model.generate_content(system_prompt)
+            # --- FIX: 3. Use start_chat to enforce instructions ---
+            chat = self.model.start_chat(history=[
+                {'role': 'user', 'parts': [system_instructions]},
+                {'role': 'model', 'parts': ["OK. I am ready to translate the code."]}
+            ])
+            
+            response = chat.send_message(user_message)
             translated_code = response.text.strip()
             translated_code = translated_code.replace(f"```{target_language.lower()}", "").replace("```", "").strip()
             log.info("Code translation successful.")

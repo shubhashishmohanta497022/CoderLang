@@ -38,7 +38,7 @@ def evaluate_code(prompt: str, code_string: str) -> str:
         
     log.info("Received request to evaluate code.")
     
-    system_prompt = f"""
+    system_instructions = f"""
     You are a CoderLang Judge/Evaluator Agent.
     Your sole purpose is to evaluate a piece of code based on a user request.
     
@@ -49,7 +49,9 @@ def evaluate_code(prompt: str, code_string: str) -> str:
     Format your response as:
     Score: [Your Score]/10
     Justification: [Your Justification]
+    """
     
+    user_message = f"""
     ---
     User Request:
     {prompt}
@@ -59,8 +61,15 @@ def evaluate_code(prompt: str, code_string: str) -> str:
     ---
     """
     
+    # --- THE FIX ---
+    messages = [
+        {'role': 'user', 'parts': [system_instructions]},
+        {'role': 'model', 'parts': ["OK. I am ready to evaluate the code."]},
+        {'role': 'user', 'parts': [user_message]}
+    ]
+    
     try:
-        response = model.generate_content(system_prompt)
+        response = model.generate_content(messages)
         evaluation = response.text.strip()
         log.info("Evaluation successful.")
         return evaluation

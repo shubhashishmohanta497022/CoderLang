@@ -32,7 +32,8 @@ class DocumentationAgent:
     def run(self, code_string: str) -> str:
         log.info("Received request to document code.")
         
-        system_prompt = f"""
+        # --- FIX: 1. System instructions are separated ---
+        system_instructions = f"""
         You are a CoderLang Documentation Agent.
         Your sole purpose is to add docstrings to the code inside the <input_code> tags.
         
@@ -40,14 +41,23 @@ class DocumentationAgent:
         Do NOT add any other functions or code.
         
         Provide *only* the Python code, now updated with your documentation.
+        """
         
+        # --- FIX: 2. User message is just the data ---
+        user_message = f"""
         <input_code>
         {code_string}
         </input_code>
         """
         
         try:
-            response = self.model.generate_content(system_prompt)
+            # --- FIX: 3. Use start_chat to enforce instructions ---
+            chat = self.model.start_chat(history=[
+                {'role': 'user', 'parts': [system_instructions]},
+                {'role': 'model', 'parts': ["OK. I am ready to document the code."]}
+            ])
+            
+            response = chat.send_message(user_message)
             documented_code = response.text
             documented_code = documented_code.strip().replace("```python", "").replace("```", "").strip()
             log.info("Documentation successful.")

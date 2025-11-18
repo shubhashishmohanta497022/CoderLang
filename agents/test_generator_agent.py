@@ -32,7 +32,7 @@ class TestGeneratorAgent:
     def run(self, code_string: str) -> str:
         log.info("Received request to generate tests.")
         
-        system_prompt = f"""
+        system_instructions = f"""
         You are a Test Generator Agent.
         Your sole purpose is to write `pytest` tests for the code inside the <input_code> tags.
         
@@ -40,14 +40,23 @@ class TestGeneratorAgent:
         Do NOT write tests for any other program.
         
         Provide *only* the Python code for the tests. No markdown.
+        """
         
+        user_message = f"""
         <input_code>
         {code_string}
         </input_code>
         """
-        
+
+        # --- THE FIX ---
+        messages = [
+            {'role': 'user', 'parts': [system_instructions]},
+            {'role': 'model', 'parts': ["OK. I am ready to generate tests."]},
+            {'role': 'user', 'parts': [user_message]}
+        ]
+
         try:
-            response = self.model.generate_content(system_prompt)
+            response = self.model.generate_content(messages)
             unit_tests = response.text
             unit_tests = unit_tests.strip().replace("```python", "").replace("```", "").strip()
             log.info("Test generation successful.")

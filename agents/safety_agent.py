@@ -32,7 +32,7 @@ class SafetyAgent:
     def run(self, code_string: str) -> str:
         log.info("Received request to scan code.")
         
-        system_prompt = f"""
+        system_instructions = f"""
         You are a CoderLang Safety Agent.
         Your sole purpose is to check the code inside the <input_code> tags.
         
@@ -44,14 +44,28 @@ class SafetyAgent:
         Format your response as:
         Verdict: [SAFE or UNSAFE]
         Justification: [Your one-sentence justification]
+        """
         
+        user_message = f"""
         <input_code>
         {code_string}
         </input_code>
         """
         
+        # --- THE FINAL FIX ---
+        # We will build a list of messages and pass it 
+        # directly to generate_content() instead of using start_chat().
+        # This is more robust.
+        
+        messages = [
+            {'role': 'user', 'parts': [system_instructions]},
+            {'role': 'model', 'parts': ["OK. I am ready to scan the code."]},
+            {'role': 'user', 'parts': [user_message]}
+        ]
+        
         try:
-            response = self.model.generate_content(system_prompt)
+            # Pass the list directly
+            response = self.model.generate_content(messages)
             verdict = response.text.strip()
             log.info("Scan successful.")
             return verdict

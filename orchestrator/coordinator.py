@@ -135,7 +135,7 @@ class Orchestrator:
             args_copy = args.copy() 
             
             for key, value in args_copy.items():
-                if value == "{{previous_step_output}}":
+                if value == "{previous_step_output}":  # <--- THIS IS THE FIX
                     if i == 0:
                         log.error("First step cannot use 'previous_step_output'.")
                         return None
