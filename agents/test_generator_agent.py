@@ -32,14 +32,23 @@ class TestGeneratorAgent:
     def run(self, code_string: str) -> str:
         log.info("Received request to generate tests.")
         
+        # --- THIS IS THE FIX ---
+        # Updated prompt to generate simple, runnable tests instead of pytest.
         system_instructions = f"""
         You are a Test Generator Agent.
-        Your sole purpose is to write `pytest` tests for the code inside the <input_code> tags.
+        Your sole purpose is to write *simple, runnable* Python tests for the code inside the <input_code> tags.
         
-        You MUST write tests for the code I provide in the <input_code> tags.
-        Do NOT write tests for any other program.
+        You MUST write tests that can be executed directly by a Python interpreter.
+        Do NOT use the `pytest` library.
+        Use simple `assert` statements within test functions.
         
-        Provide *only* the Python code for the tests. No markdown.
+        To make the tests run, you MUST include a main execution block at the end, like:
+        if __name__ == "__main__":
+            # ... call your test functions here ...
+            print("All tests passed!")
+        
+        Provide *only* the Python code for the tests, including the main block.
+        Do not include markdown or '```python' wrappers.
         """
         
         user_message = f"""
@@ -48,10 +57,9 @@ class TestGeneratorAgent:
         </input_code>
         """
 
-        # --- THE FIX ---
         messages = [
             {'role': 'user', 'parts': [system_instructions]},
-            {'role': 'model', 'parts': ["OK. I am ready to generate tests."]},
+            {'role': 'model', 'parts': ["OK. I am ready to generate simple, runnable tests."]},
             {'role': 'user', 'parts': [user_message]}
         ]
 
