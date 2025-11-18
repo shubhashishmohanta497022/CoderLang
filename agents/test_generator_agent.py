@@ -32,8 +32,6 @@ class TestGeneratorAgent:
     def run(self, code_string: str) -> str:
         log.info("Received request to generate tests.")
         
-        # --- THIS IS THE FIX ---
-        # Updated prompt to generate simple, runnable tests instead of pytest.
         system_instructions = f"""
         You are a Test Generator Agent.
         Your sole purpose is to write *simple, runnable* Python tests for the code inside the <input_code> tags.
@@ -66,7 +64,15 @@ class TestGeneratorAgent:
         try:
             response = self.model.generate_content(messages)
             unit_tests = response.text
-            unit_tests = unit_tests.strip().replace("```python", "").replace("```", "").strip()
+            
+            # --- FIX: Clean up markdown wrappers before returning ---
+            unit_tests = unit_tests.strip()
+            if unit_tests.startswith("```python"):
+                 unit_tests = unit_tests.replace("```python", "").strip()
+            if unit_tests.endswith("```"):
+                 unit_tests = unit_tests.rstrip("`").strip()
+            # ------------------------------------------------------
+            
             log.info("Test generation successful.")
             return unit_tests
         except Exception as e:

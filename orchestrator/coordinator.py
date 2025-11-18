@@ -3,7 +3,7 @@ import os
 import json
 import logging
 
-# Import all our agents
+# --- Import all Agents ---
 from agents.coding_agent import CodingAgent
 from agents.safety_agent import SafetyAgent
 from agents.translate_agent import TranslateAgent
@@ -11,11 +11,13 @@ from agents.test_generator_agent import TestGeneratorAgent
 from agents.explain_agent import ExplainAgent
 from agents.debugging_agent import DebuggingAgent
 from agents.doc_agent import DocumentationAgent
-from orchestrator.evaluator import evaluate_code
+from agents.research_agent import ResearchAgent  # <--- NEW: Research Agent
 
-# Import Tools
+# --- Import Tools and Utilities ---
 from tools.run_code import run_python_code
+from tools.file_tool import FileTool             # <--- NEW: File Tool
 from memory.memory_store import MemoryStore
+from orchestrator.evaluator import evaluate_code
 
 # Get a logger for this module
 log = logging.getLogger(__name__)
@@ -25,9 +27,9 @@ class Orchestrator:
         """
         Initializes the Orchestrator, its planning model, memory, and all available agents.
         """
-        log.info("Initializing...")
+        log.info("Initializing Orchestrator...")
         
-        # Configure the planning model
+        # 1. Configure Gemini
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             log.error("GOOGLE_API_KEY not found.")
@@ -35,6 +37,8 @@ class Orchestrator:
         
         genai.configure(api_key=api_key)
         
+        # 2. Configure the Planner Model
+        # This model is responsible for breaking down the user's request into steps.
         self.planner_model = genai.GenerativeModel(
             model_name='gemini-2.5-pro',
             safety_settings=[{"category": c, "threshold": "BLOCK_NONE"} for c in [
@@ -44,11 +48,11 @@ class Orchestrator:
         )
         log.info("Planner model configured.")
 
-        # Initialize Memory
+        # 3. Initialize Memory
         self.memory = MemoryStore()
         log.info("MemoryStore initialized.")
 
-        # Create a "toolbox" of all our agents
+        # 4. Initialize the ToolBox of Agents
         self.agents = {
             "CodingAgent": CodingAgent(),
             "SafetyAgent": SafetyAgent(),
@@ -57,7 +61,12 @@ class Orchestrator:
             "ExplainAgent": ExplainAgent(),
             "DebuggingAgent": DebuggingAgent(),
             "DocumentationAgent": DocumentationAgent(),
+            "ResearchAgent": ResearchAgent(), # <--- Added Research Capability
         }
+        
+        # 5. Initialize Utility Tools (available to orchestrator directly if needed)
+        self.file_tool = FileTool()
+        
         log.info(f"Loaded {len(self.agents)} agents into toolbox.")
 
     def generate_plan(self, user_prompt: str):
@@ -67,14 +76,12 @@ class Orchestrator:
         """
         log.info(f"Generating plan for: '{user_prompt}'")
         
-        # Fetch Memory Context
+        # Fetch Memory Context (User preferences, etc.)
         memory_context = self.memory.get_all_context()
-        if memory_context:
-            log.info(f"Injected Memory Context:\n{memory_context.strip()}")
         
         agent_names = list(self.agents.keys())
         
-        # This is our strict "meta-prompt"
+        # --- The Meta-Prompt for Planning ---
         system_prompt = f"""
         You are the "brain" of a multi-agent system.
         Your job is to create a step-by-step JSON plan to fulfill a user's request.
@@ -91,6 +98,7 @@ class Orchestrator:
         
         Here are the argument signatures:
         - CodingAgent(prompt: str)
+        - ResearchAgent(query: str)  <--- Use this to find info, docs, or fix errors via Google Search.
         - SafetyAgent(code_string: str)
         - TranslateAgent(code_string: str, target_language: str)
         - TestGeneratorAgent(code_string: str)
@@ -99,15 +107,13 @@ class Orchestrator:
         - DocumentationAgent(code_string: str)
         
         RULES:
-        1.  You MUST create a step for *every* distinct action in the user's request.
-        2.  The *first* step must *always* be the 'CodingAgent'. Its 'prompt' argument
-            should be your best interpretation of the user's *entire* coding request,
-            incorporating any preferences from the Memory Context.
-        3.  The *second* step must *always* be the 'SafetyAgent' to check the code.
-        4.  For all steps after 'CodingAgent', you MUST use the placeholder string
-            "{{previous_step_output}}" as the 'code_string' argument.
-        5.  Do not add agents that the user did not ask for, *except* for the
-            mandatory 'CodingAgent' and 'SafetyAgent'.
+        1.  Create a step for *every* distinct action needed.
+        2.  If the user asks for information or research, start with 'ResearchAgent'.
+        3.  If the user asks to write code, the 'CodingAgent' step is MANDATORY.
+        4.  The 'SafetyAgent' step is MANDATORY immediately after any 'CodingAgent' step.
+        5.  For steps after 'CodingAgent', use "{{previous_step_output}}" as the 'code_string' argument 
+            to pass the code along.
+        6.  Do not add agents that the user did not ask for, *except* for the mandatory 'SafetyAgent'.
             
         The user's request is: "{user_prompt}"
         
@@ -135,6 +141,7 @@ class Orchestrator:
         
         results = {}
         original_code = None 
+        research_context = "" # Stores output from ResearchAgent to help CodingAgent
         
         for i, step in enumerate(plan):
             agent_name = step["agent"]
@@ -147,53 +154,55 @@ class Orchestrator:
                 continue
             
             agent = self.agents[agent_name]
-            
             args_copy = args.copy() 
             
-            # Robust Placeholder Replacement
+            # --- LOGIC: Inject Research Context ---
+            # If we have research from a previous step, and we are now coding,
+            # we MUST give that research to the coder.
+            if agent_name == "CodingAgent" and research_context:
+                log.info("Injecting research context into CodingAgent prompt...")
+                args_copy["prompt"] = args_copy["prompt"] + f"\n\n[Context from Research]:\n{research_context}"
+
+            # --- LOGIC: Placeholder Replacement ---
+            # Pass the code from one agent to the next (e.g., Coder -> Safety -> Test)
             for key, value in args_copy.items():
                 if isinstance(value, str) and "previous_step_output" in value:
                     if original_code:
                         args_copy[key] = original_code 
                     else:
-                        log.error("Placeholder found but no 'original_code' available to pass.")
-                        # Fallback to recover if possible
+                        # Fallback: try to get it from the specific coding step if available
                         if "step_1_CodingAgent" in results:
                              args_copy[key] = results["step_1_CodingAgent"]
-                             original_code = results["step_1_CodingAgent"] 
+                             original_code = results["step_1_CodingAgent"]
                         else:
-                             args_copy[key] = None
+                             log.warning("Placeholder found but no code available. Passing empty string.")
+                             args_copy[key] = ""
             
             try:
+                # --- RUN THE AGENT ---
                 output = agent.run(**args_copy)
                 
-                # If this is the CodingAgent, capture the code immediately
+                # --- CAPTURE OUTPUTS ---
                 if agent_name == "CodingAgent":
                     original_code = output
+                elif agent_name == "ResearchAgent":
+                    research_context = output  # Save research for later steps
                 
                 results[f"step_{i+1}_{agent_name}"] = output
                 
                 log.info(f"Step {i+1} ({agent_name}) execution complete.")
-
-                # Logging Logic
-                if agent_name == "SafetyAgent":
-                    try:
-                        verdict = output.split('\n')[0].split(':', 1)[1].strip()
-                        justification = output.split('\n')[1].split(':', 1)[1].strip()
-                        log.info(f"\n  SafetyAgent Verdict: {verdict}\n  Reason: {justification}")
-                    except Exception:
-                        snippet_no_newlines = output.replace('\n', ' ')
-                        log.info(f"  > Output (Snippet): {snippet_no_newlines}")
-                else:
-                    snippet = (output.replace('\n', ' ')[:150] + '...')
-                    log.info(f"  > Output (Snippet): {snippet}")
                 
+                # Log a snippet of the output
+                snippet = str(output).replace('\n', ' ')[:150] + '...'
+                log.info(f"  > Output: {snippet}")
                 
                 # --- DYNAMIC TEST & DEBUG LOOP ---
+                # If we just generated tests, let's actually RUN them.
                 if agent_name == "TestGeneratorAgent" and original_code:
                     log.info("--- Executing Step: Run Tests (Auto) ---")
                     test_code = output 
                     
+                    # Combine app code + test code
                     combined_code = original_code + "\n\n" + test_code
                     
                     test_results = run_python_code(combined_code)
@@ -202,6 +211,7 @@ class Orchestrator:
                     if test_results["stderr"]:
                         log.warning(f"Test run FAILED:\n{test_results['stderr']}")
                         
+                        # --- AUTO-DEBUGGING ---
                         log.info("--- Executing Step: Debug (Auto) ---")
                         debug_agent = self.agents.get("DebuggingAgent")
                         
@@ -213,10 +223,9 @@ class Orchestrator:
                                 )
                                 log.info("Auto-debug attempt complete.")
                                 
-                                # Update original_code with the FIX
+                                # Update state with the FIX
                                 original_code = fixed_code 
                                 results["step_auto_Debug"] = fixed_code
-                                log.info("  > (Auto-Debug) Output (Snippet): " + (fixed_code.replace('\n', ' ')[:150] + '...'))
                                 
                                 # Re-Run Tests
                                 log.info("--- Executing Step: Re-Run Tests (Auto) ---")
@@ -225,18 +234,17 @@ class Orchestrator:
                                 results["step_auto_ReRunTests"] = retest_results
                                 
                                 if retest_results["stderr"]:
-                                    log.warning(f"RE-TEST FAILED:\n{retest_results['stderr']}")
+                                    log.warning("RE-TEST FAILED even after debugging.")
                                 else:
-                                    log.info(f"RE-TEST PASSED! STDOUT: {retest_results['stdout']}")
+                                    log.info("RE-TEST PASSED!")
                                     
                             except Exception as e:
                                 log.error(f"Auto-debug step failed: {e}")
                         else:
-                            log.warning("Test failed, but DebuggingAgent not found.")
+                            log.warning("DebuggingAgent not available.")
                     
                     else: # No stderr
                         log.info("Test run PASSED!")
-                        log.info(f"  > STDOUT: {test_results['stdout']}")
                 # --- END DYNAMIC LOOP ---
                 
             except Exception as e:
@@ -247,17 +255,15 @@ class Orchestrator:
         # --- Final Evaluation Step ---
         log.info("--- Executing Step: Evaluator ---")
         if original_code: 
-            code_to_evaluate = original_code
-            evaluation = evaluate_code(original_prompt, code_to_evaluate)
+            evaluation = evaluate_code(original_prompt, original_code)
             results["final_evaluation"] = evaluation
             
+            # Log evaluation nicely
             try:
                 score = evaluation.split('\n')[0].split(':', 1)[1].strip()
-                justification = evaluation.split('\n')[1].split(':', 1)[1].strip()
-                log.info(f"\n  Score: {score}\n  Justification: {justification}")
-            except Exception:
-                eval_no_newlines = evaluation.replace('\n', ' ')
-                log.info(f"  > Evaluation: {eval_no_newlines}")
+                log.info(f"  > Evaluator Score: {score}")
+            except:
+                log.info("  > Evaluator ran (see results).")
         
         log.info("Plan execution complete.")
         return results

@@ -1,8 +1,7 @@
 import google.generativeai as genai
 import os
-import logging # --- 1. Import logging ---
+import logging 
 
-# --- 2. Get a logger for this specific file ---
 log = logging.getLogger(__name__)
 
 class CodingAgent:
@@ -10,11 +9,11 @@ class CodingAgent:
         """
         Initializes the Coding Agent and configures the Gemini model.
         """
-        log.info("Initializing...") # --- 3. Change 'print' to 'log.info' ---
+        log.info("Initializing...") 
         
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            log.error("GOOGLE_API_KEY not found.") # --- Use 'log.error' for problems ---
+            log.error("GOOGLE_API_KEY not found.") 
             raise ValueError("GOOGLE_API_KEY not found.")
         
         genai.configure(api_key=api_key)
@@ -44,8 +43,8 @@ class CodingAgent:
         You MUST follow all Python syntax rules and standard PEP 8
         style guides. Pay close attention to indentation.
         
-        Provide *only* the Python code.
-        Do not include any explanations, markdown, or '```python' wrappers.
+        Provide *only* the raw, runnable Python code.
+        Do NOT include any explanations, comments, or Markdown wrappers (e.g., '```python').
         
         User Request: {prompt}
         """
@@ -53,8 +52,17 @@ class CodingAgent:
         try:
             response = self.model.generate_content(system_prompt)
             generated_code = response.text
+            
+            # --- FIX: Clean up markdown wrappers before returning ---
+            generated_code = generated_code.strip()
+            if generated_code.startswith("```python"):
+                 generated_code = generated_code.replace("```python", "").strip()
+            if generated_code.endswith("```"):
+                 generated_code = generated_code.rstrip("`").strip()
+            # ----------------------------------------------------
+
             log.info("Code generation successful.")
             return generated_code
         except Exception as e:
-            log.error(f"Code generation failed! Error: {e}") # --- Use 'log.error' ---
+            log.error(f"Code generation failed! Error: {e}") 
             return f"An error occurred: {e}"
