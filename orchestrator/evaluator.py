@@ -28,9 +28,10 @@ except Exception as e:
     log.critical(f"FAILED TO INITIALIZE MODEL: {e}")
     model = None
 
-def evaluate_code(prompt: str, code_string: str) -> str:
+def evaluate_code(prompt: str, code_string: str, explanation: str = "", tests: str = "") -> str:
     """
     Runs the Judge/Evaluator agent.
+    Now accepts explanation and tests to give a fair score.
     """
     if model is None:
         log.error("Evaluator model not initialized.")
@@ -40,7 +41,15 @@ def evaluate_code(prompt: str, code_string: str) -> str:
     
     system_instructions = f"""
     You are a CoderLang Judge/Evaluator Agent.
-    Your sole purpose is to evaluate a piece of code based on a user request.
+    Your purpose is to evaluate if the system fulfilled the user's request.
+    
+    You will be provided with:
+    1. The User's Request
+    2. The Generated Code
+    3. The Generated Explanation (optional)
+    4. The Generated Tests (optional)
+    
+    Evaluate the *completeness* and *quality* of the entire package.
     
     You must provide two things:
     1. A score from 1 (terrible) to 10 (perfect).
@@ -59,12 +68,17 @@ def evaluate_code(prompt: str, code_string: str) -> str:
     Generated Code:
     {code_string}
     ---
+    Generated Explanation:
+    {explanation if explanation else "None provided"}
+    ---
+    Generated Tests:
+    {tests if tests else "None provided"}
+    ---
     """
     
-    # --- THE FIX ---
     messages = [
         {'role': 'user', 'parts': [system_instructions]},
-        {'role': 'model', 'parts': ["OK. I am ready to evaluate the code."]},
+        {'role': 'model', 'parts': ["OK. I am ready to evaluate the entire output."]},
         {'role': 'user', 'parts': [user_message]}
     ]
     
