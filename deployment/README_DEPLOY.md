@@ -1,96 +1,85 @@
-☁ Deployment Guide: Vertex AI Agent Engine / Cloud Run
+☁️ CoderLang Enterprise Deployment Guide
 
-This guide outlines the theoretical steps and configuration for deploying the CoderLang multi-agent system to Google Cloud.
+This guide details how to deploy the CoderLang Multi-Agent System to Google Cloud Platform (GCP).
 
-1. Prerequisites
+Prerequisites
 
-Google Cloud Project: A valid Google Cloud project with billing enabled.
+Google Cloud Project: A project with billing enabled.
 
-APIs: The Vertex AI API and Cloud Run API must be enabled.
+APIs Enabled:
 
-Authentication: gcloud CLI installed and authenticated (gcloud auth login).
+Cloud Run API
 
-2. Docker Image Creation
+Artifact Registry API
 
-The system uses the Dockerfile in the root directory. Build and push the image to Google Container Registry (GCR) or Artifact Registry (AR).
+Vertex AI API (for the Agent Engine track)
 
-# 1. Set variables
-export PROJECT_ID="your-gcp-project-id"
-export REPO_NAME="coderlang-repo"
-export IMAGE_NAME="gcr.io/${PROJECT_ID}/${REPO_NAME}:latest"
+Tools:
 
-# 2. Build the image
-docker build -t ${IMAGE_NAME} .
+Google Cloud SDK (gcloud) installed and authenticated.
 
-# 3. Push the image (ensure Docker is configured for gcr.io or AR)
-docker push ${IMAGE_NAME}
+Option 1: Rapid Deployment (Cloud Run)
 
+This method deploys the application as a serverless container. This includes the Streamlit Dashboard.
 
-3. Vertex AI Agent Engine Deployment (Advanced)
+1. Configure Environment
 
-This path uses the Agent Development Kit (ADK) integration with Vertex AI. It offers managed scaling and integrates with Vertex AI's tooling (logging, monitoring).
+Ensure you have your API key ready.
 
-The configuration uses the vertex_config.yaml (placeholder below).
-
-vertex_config.yaml (Conceptual)
-
-# deployment/vertex_config.yaml
-display_name: "CoderLang-AgentEngine"
-description: "Multi-Agent Coding Assistant powered by Gemini"
-agent_container:
-  # Reference the image built in Step 2
-  image_uri: "${IMAGE_NAME}"
-  # Environment variable for the API key, configured in Vertex AI Secret Manager
-  env_vars:
-    - name: "GOOGLE_API_KEY_SECRET"
-      value: "projects/${PROJECT_ID}/secrets/GEMINI_API_KEY/versions/latest"
-  # Entrypoint must point to the main execution file
-  command: ["python", "main.py"]
+export GOOGLE_API_KEY="AIzaSy..."
+export PROJECT_ID="your-project-id"
 
 
-Deployment Command:
+2. Run Deployment Script
 
-# Assuming you have the Vertex AI ADK SDK installed
-# This command registers and deploys the container as a managed agent service.
+We have provided an automated script to build the container and push it to Cloud Run.
+
+chmod +x deployment/deploy.sh
+./deployment/deploy.sh
+
+
+What this script does:
+
+Builds the Docker image using Cloud Build.
+
+Pushes the image to Google Container Registry (GCR).
+
+Deploys a Cloud Run service named coderlang-enterprise.
+
+Exposes port 8501 (Streamlit).
+
+3. Access the Dashboard
+
+Once complete, the script will output a URL:
+https://coderlang-enterprise-xyz-uc.a.run.app
+
+Option 2: Vertex AI Agent Engine (Advanced)
+
+For enterprise integration with Google's managed Agent ecosystem.
+
+1. Create Secret
+
+Store your API key securely.
+
+gcloud secrets create GEMINI_API_KEY --data-file=.env
+
+
+2. Deploy Agent
+
+Use the vertex_config.yaml configuration.
+
 gcloud ai agent-engine deploy --config-file=deployment/vertex_config.yaml
 
 
-4. Cloud Run Deployment (Simplified HTTP Service)
+🐳 Local Docker Testing
 
-If CoderLang were wrapped in a simple FastAPI or Flask web endpoint, Cloud Run provides a simpler, serverless deployment option.
+To test the production build locally before deploying:
 
-cloudrun.yaml (Conceptual)
+# Build
+docker build -t coderlang .
 
-# deployment/cloudrun.yaml
-apiVersion: serving.knative.dev/v1
-kind: Service
-metadata:
-  name: coderlang-service
-  annotations:
-    [run.googleapis.com/ingress](https://run.googleapis.com/ingress): "all"
-spec:
-  template:
-    spec:
-      containers:
-      - image: ${IMAGE_NAME}
-        resources:
-          limits:
-            cpu: 2000m
-            memory: 4Gi # LLM agents are memory intensive
-        env:
-          - name: GOOGLE_API_KEY
-            # Secret manager is highly recommended for production
-            valueFrom:
-              secretKeyRef:
-                name: gemini-api-key-secret
-                key: latest
+# Run (Port 8501 mapped for Dashboard)
+docker run -p 8501:8501 --env-file .env coderlang
 
 
-Deployment Command:
-
-gcloud run deploy coderlang-service \
-    --image ${IMAGE_NAME} \
-    --platform managed \
-    --region us-central1 \
-    --allow-unauthenticated \
-    --set-secrets=GOOGLE_API_KEY=GEMINI_API_KEY:latest
+Visit http://localhost:8501 to verify.

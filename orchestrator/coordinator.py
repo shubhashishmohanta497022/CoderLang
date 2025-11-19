@@ -2,6 +2,8 @@ import google.generativeai as genai
 import os
 import json
 import logging
+import concurrent.futures
+from config import FAST_MODEL, SMART_MODEL, SAFETY_SETTINGS
 
 # --- Import all Agents ---
 from agents.coding_agent import CodingAgent
@@ -19,17 +21,12 @@ from tools.file_tool import FileTool
 from memory.memory_store import MemoryStore
 from orchestrator.evaluator import evaluate_code
 
-# Get a logger for this module
 log = logging.getLogger(__name__)
 
 class Orchestrator:
     def __init__(self):
-        """
-        Initializes the Orchestrator, its planning model, memory, and all available agents.
-        """
         log.info("Initializing Orchestrator...")
         
-        # 1. Configure Gemini
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             log.error("GOOGLE_API_KEY not found.")
@@ -37,21 +34,16 @@ class Orchestrator:
         
         genai.configure(api_key=api_key)
         
-        # 2. Configure the Planner Model
+        # Default to FAST model for Planning/Routing
         self.planner_model = genai.GenerativeModel(
-            model_name='gemini-2.5-pro',
-            safety_settings=[{"category": c, "threshold": "BLOCK_NONE"} for c in [
-                "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"
-            ]]
+            model_name=FAST_MODEL,
+            safety_settings=SAFETY_SETTINGS
         )
-        log.info("Planner model configured.")
+        log.info(f"Planner/Router initialized using {FAST_MODEL}.")
 
-        # 3. Initialize Memory
         self.memory = MemoryStore()
-        log.info("MemoryStore initialized.")
-
-        # 4. Initialize the ToolBox of Agents
+        
+        # Initialize all agents (Defaulting to whatever config.MODEL_NAME was, usually Flash)
         self.agents = {
             "CodingAgent": CodingAgent(),
             "SafetyAgent": SafetyAgent(),
@@ -62,211 +54,187 @@ class Orchestrator:
             "DocumentationAgent": DocumentationAgent(),
             "ResearchAgent": ResearchAgent(),
         }
-        
-        # 5. Initialize Utility Tools
         self.file_tool = FileTool()
-        
-        log.info(f"Loaded {len(self.agents)} agents into toolbox.")
+
+    def _optimize_agent_models(self, complexity: str):
+        """
+        Dynamically swaps agent brains based on task complexity.
+        """
+        if complexity == "COMPLEX":
+            log.info(f"🧠 SWITCHING TO SMART MODE ({SMART_MODEL}) for Coding/Debugging.")
+            # We hot-swap the model object inside the specific agents
+            smart_model_obj = genai.GenerativeModel(model_name=SMART_MODEL, safety_settings=SAFETY_SETTINGS)
+            
+            # Only upgrade the "Brain" agents
+            self.agents["CodingAgent"].model = smart_model_obj
+            self.agents["DebuggingAgent"].model = smart_model_obj
+            self.agents["ExplainAgent"].model = smart_model_obj # Optional: Explain in detail
+        else:
+            log.info(f"⚡ REMAINING IN FAST MODE ({FAST_MODEL}) for simple task.")
 
     def generate_plan(self, user_prompt: str):
-        """
-        Calls the LLM to generate a structured plan (JSON).
-        """
-        log.info(f"Generating plan for: '{user_prompt}'")
+        log.info(f"Analyzing request: '{user_prompt}'")
         
+        # --- 1. ROUTER STEP: Determine Complexity ---
+        try:
+            router_prompt = f"""
+            Analyze this coding request: "{user_prompt}"
+            Is this a 'SIMPLE' task (e.g., parsing, basic scripts, fibonacci) 
+            or a 'COMPLEX' task (e.g., architecture, advanced algorithms, debugging w/ no context)?
+            Respond with ONLY the word SIMPLE or COMPLEX.
+            """
+            router_response = self.planner_model.generate_content(router_prompt)
+            complexity = router_response.text.strip().upper()
+            if "COMPLEX" not in complexity: complexity = "SIMPLE"
+            
+            # Apply the model switch
+            self._optimize_agent_models(complexity)
+            
+        except Exception as e:
+            log.warning(f"Router failed, defaulting to simple mode: {e}")
+            complexity = "SIMPLE"
+
+        # --- 2. PLANNER STEP ---
         memory_context = self.memory.get_all_context()
         agent_names = list(self.agents.keys())
         
         system_prompt = f"""
         You are the "brain" of a multi-agent system.
-        Your job is to create a step-by-step JSON plan to fulfill a user's request.
+        Create a step-by-step JSON plan.
         
-        You have the following agents available:
-        {agent_names}
-        
-        --- MEMORY CONTEXT (User Preferences) ---
-        {memory_context}
-        -----------------------------------------
-        
-        Your plan MUST be a JSON list of steps.
-        Each step must be a dictionary with an "agent" key and an "args" key.
-        
-        Here are the argument signatures:
-        - CodingAgent(prompt: str)
-        - ResearchAgent(query: str)
-        - SafetyAgent(code_string: str)
-        - TranslateAgent(code_string: str, target_language: str)
-        - TestGeneratorAgent(code_string: str)
-        - ExplainAgent(code_string: str)
-        - DebuggingAgent(code_string: str, error_message: str)
-        - DocumentationAgent(code_string: str)
+        Agents: {agent_names}
+        Context: {memory_context}
+        Complexity Level: {complexity}
         
         RULES:
-        1.  Create a step for *every* distinct action needed.
-        2.  If the user asks for information, start with 'ResearchAgent'.
-        3.  If the user asks to write code, 'CodingAgent' is MANDATORY.
-        4.  'SafetyAgent' is MANDATORY immediately after 'CodingAgent'.
-        5.  For steps after 'CodingAgent', use "{{previous_step_output}}" as the 'code_string'.
-            
-        The user's request is: "{user_prompt}"
+        1. Start with 'ResearchAgent' only if asking for specific knowledge.
+        2. 'CodingAgent' is MANDATORY for code tasks.
+        3. 'SafetyAgent' is MANDATORY after coding.
+        4. IF Complexity is 'COMPLEX': ALWAYS include TestGenerator, ExplainAgent, DocumentationAgent.
+        5. IF Complexity is 'SIMPLE': You MAY skip Explain/Doc agents to save time, unless explicitly requested.
+        6. Use "{{previous_step_output}}" for 'code_string' arguments.
+
+        User Request: "{user_prompt}"
         
-        Generate the JSON plan. No markdown.
+        Generate JSON list.
         """
         
         try:
             response = self.planner_model.generate_content(system_prompt)
             plan_json = response.text.strip().replace("```json", "").replace("```", "").strip()
-            log.info(f"Plan generated:\n{plan_json}")
             return json.loads(plan_json)
-        
         except Exception as e:
             log.error(f"FAILED to generate plan! Error: {e}")
             return None
 
     def execute_plan(self, plan: list, original_prompt: str):
-        """
-        Executes the generated plan step-by-step.
-        """
         log.info("Starting plan execution...")
-        
         results = {}
         original_code = None 
         research_context = ""
+        executed_indices = set()
         
         for i, step in enumerate(plan):
+            if i in executed_indices: continue
+            
             agent_name = step["agent"]
-            args = step["args"]
             
-            log.info(f"--- Executing Step {i+1}: {agent_name} ---")
+            # --- PARALLELIZATION LOGIC ---
+            independent_agents = ["ExplainAgent", "TestGeneratorAgent", "DocumentationAgent", "TranslateAgent"]
+            parallel_candidates = []
             
-            if agent_name not in self.agents:
-                log.error(f"Agent '{agent_name}' not found.")
-                continue
+            if agent_name in independent_agents:
+                for j in range(i + 1, len(plan)):
+                    other_step = plan[j]
+                    if other_step["agent"] in independent_agents and other_step["agent"] != agent_name:
+                        parallel_candidates.append((j, other_step))
+            
+            if parallel_candidates:
+                other_idx, other_step = parallel_candidates[0]
+                other_agent_name = other_step["agent"]
+                
+                log.info(f"⚡ OPTIMIZATION: Running {agent_name} and {other_agent_name} in PARALLEL.")
+                
+                def prepare_args(step_args):
+                    a_args = step_args.copy()
+                    if "prompt" in a_args and research_context:
+                         a_args["prompt"] += f"\n\n[Context]:\n{research_context}"
+                    for k, v in a_args.items():
+                        if isinstance(v, str) and "previous_step_output" in v:
+                            a_args[k] = original_code if original_code else ""
+                    if original_code and "code_string" in a_args:
+                        a_args["code_string"] = original_code
+                    return a_args
+
+                args_1 = prepare_args(step["args"])
+                args_2 = prepare_args(other_step["args"])
+                
+                try:
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future_1 = executor.submit(self.agents[agent_name].run, **args_1)
+                        future_2 = executor.submit(self.agents[other_agent_name].run, **args_2)
+                        output_1, output_2 = future_1.result(), future_2.result()
+                        
+                    results[f"step_{i+1}_{agent_name}"] = output_1
+                    results[f"step_{other_idx+1}_{other_agent_name}"] = output_2
+                    executed_indices.add(i)
+                    executed_indices.add(other_idx)
+                    
+                    for a_name, a_out in [(agent_name, output_1), (other_agent_name, output_2)]:
+                        if a_name == "TestGeneratorAgent" and original_code:
+                             self._handle_test_execution(original_code, a_out, results)
+                    continue
+                except Exception as e:
+                    log.error(f"Parallel failed: {e}")
+
+            # --- SEQUENTIAL EXECUTION ---
+            if agent_name not in self.agents: continue
             
             agent = self.agents[agent_name]
-            args_copy = args.copy() 
+            args_copy = step["args"].copy()
             
-            # --- 1. Inject Research Context ---
             if agent_name == "CodingAgent" and research_context:
-                log.info("Injecting research context into CodingAgent prompt...")
-                args_copy["prompt"] = args_copy["prompt"] + f"\n\n[Context from Research]:\n{research_context}"
-
-            # --- 2. STANDARD Placeholder Replacement ---
-            for key, value in args_copy.items():
-                if isinstance(value, str) and "previous_step_output" in value:
-                    if original_code:
-                        args_copy[key] = original_code 
-                    else:
-                         # Fallback: try to get it from result history
-                        for k, v in results.items():
-                             if "CodingAgent" in k and isinstance(v, str):
-                                  args_copy[key] = v
-                                  original_code = v
-                                  break
-                        if not original_code:
-                             log.warning("Placeholder found but no code available. Passing empty string.")
-                             args_copy[key] = ""
-
-            # --- 3. CRITICAL FIX: FORCE CODE INJECTION ---
-            # The planner sometimes hallucinates specific text (like "classify triangle") 
-            # in the 'code_string' argument instead of using the placeholder. 
-            # We must OVERRIDE this if we have generated code and the agent is a downstream consumer.
-            if original_code and agent_name in [
-                "SafetyAgent", "TranslateAgent", "TestGeneratorAgent", 
-                "ExplainAgent", "DebuggingAgent", "DocumentationAgent"
-            ]:
-                if "code_string" in args_copy:
-                    log.info(f"  > Guardrail: Forcing 'original_code' into {agent_name} args.")
-                    args_copy["code_string"] = original_code
-
+                args_copy["prompt"] += f"\n\n[Context]:\n{research_context}"
             
+            for k, v in args_copy.items():
+                if isinstance(v, str) and "previous_step_output" in v:
+                    args_copy[k] = original_code if original_code else ""
+            
+            if original_code and "code_string" in args_copy:
+                args_copy["code_string"] = original_code
+
             try:
-                # --- RUN THE AGENT ---
                 output = agent.run(**args_copy)
                 
-                # --- CAPTURE OUTPUTS ---
-                if agent_name == "CodingAgent":
-                    original_code = output
-                elif agent_name == "ResearchAgent":
-                    research_context = output
+                if agent_name == "CodingAgent": original_code = output
+                elif agent_name == "ResearchAgent": research_context = output
                 
                 results[f"step_{i+1}_{agent_name}"] = output
                 
-                log.info(f"Step {i+1} ({agent_name}) execution complete.")
-                
-                snippet = str(output).replace('\n', ' ')[:100] + '...'
-                log.info(f"  > Output: {snippet}")
-                
-                # --- DYNAMIC TEST & DEBUG LOOP ---
                 if agent_name == "TestGeneratorAgent" and original_code:
-                    log.info("--- Executing Step: Run Tests (Auto) ---")
-                    test_code = output 
-                    combined_code = original_code + "\n\n" + test_code
+                    self._handle_test_execution(original_code, output, results)
                     
-                    test_results = run_python_code(combined_code)
-                    results["step_auto_RunTests"] = test_results
-                    
-                    if test_results["stderr"]:
-                        log.warning(f"Test run FAILED:\n{test_results['stderr']}")
-                        
-                        log.info("--- Executing Step: Debug (Auto) ---")
-                        debug_agent = self.agents.get("DebuggingAgent")
-                        
-                        if debug_agent:
-                            try:
-                                fixed_code = debug_agent.run(
-                                    code_string=original_code, 
-                                    error_message=test_results["stderr"]
-                                )
-                                log.info("Auto-debug attempt complete.")
-                                original_code = fixed_code 
-                                results["step_auto_Debug"] = fixed_code
-                                
-                                log.info("--- Executing Step: Re-Run Tests (Auto) ---")
-                                new_combined_code = original_code + "\n\n" + test_code
-                                retest_results = run_python_code(new_combined_code)
-                                results["step_auto_ReRunTests"] = retest_results
-                                
-                                if retest_results["stderr"]:
-                                    log.warning("RE-TEST FAILED even after debugging.")
-                                else:
-                                    log.info("RE-TEST PASSED!")
-                                    
-                            except Exception as e:
-                                log.error(f"Auto-debug step failed: {e}")
-                    else: 
-                        log.info("Test run PASSED!")
-                
             except Exception as e:
-                log.error(f"Error during agent execution: {e}")
-                results[f"step_{i+1}_{agent_name}"] = f"ERROR: {e}"
-                break 
-                
-        # --- Final Evaluation Step ---
-        log.info("--- Executing Step: Evaluator ---")
-        if original_code:
-            # Gather all relevant context for the evaluator
-            explanation_text = ""
-            tests_text = ""
-            
-            # Iterate through results to find explanation and tests
-            for key, val in results.items():
-                if "ExplainAgent" in key:
-                    explanation_text = val
-                elif "TestGeneratorAgent" in key:
-                    tests_text = val
+                log.error(f"Agent error: {e}")
+                break
 
-            # Use the updated evaluator signature
-            evaluation = evaluate_code(
-                original_prompt, 
-                original_code, 
-                explanation=explanation_text, 
-                tests=tests_text
-            )
-            results["final_evaluation"] = evaluation
-            
-            # Log the full evaluation so we can see the justification
-            log.info(f"  > Evaluator Output:\n{evaluation}")
-        
-        log.info("Plan execution complete.")
+        # Evaluation
+        if original_code:
+            expl = next((v for k,v in results.items() if "Explain" in k), "")
+            tests = next((v for k,v in results.items() if "Test" in k), "")
+            results["final_evaluation"] = evaluate_code(original_prompt, original_code, expl, tests)
+
         return results
+
+    def _handle_test_execution(self, original_code, test_code, results):
+        combined = original_code + "\n\n" + test_code
+        res = run_python_code(combined)
+        results["step_auto_RunTests"] = res
+        if res["stderr"]:
+            log.info("Tests failed, debugging...")
+            debug_agent = self.agents.get("DebuggingAgent")
+            if debug_agent:
+                try:
+                    fixed = debug_agent.run(original_code, res["stderr"])
+                    results["step_auto_Debug"] = fixed
+                except: pass

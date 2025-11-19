@@ -1,0 +1,30 @@
+# Vertex AI Agent Engine Configuration
+api_version: 1
+kind: Agent
+metadata:
+  name: coderlang-enterprise
+  display_name: "CoderLang Enterprise Assistant"
+  description: "Multi-agent coding system powered by Gemini 2.5"
+
+spec:
+  agent_container:
+    image_uri: "gcr.io/${PROJECT_ID}/coderlang-enterprise:latest"
+    command: ["python", "main.py"]
+    env:
+      - name: GOOGLE_API_KEY
+        value_source:
+          secret_manager_secret_version_ref:
+            secret: "projects/${PROJECT_ID}/secrets/GEMINI_API_KEY/versions/latest"
+    resources:
+      cpu: 2
+      memory: 4Gi
+
+  scaling:
+    min_replica_count: 1
+    max_replica_count: 5
+
+  observability:
+    logging:
+      enabled: true
+    monitoring:
+      enabled: true
