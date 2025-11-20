@@ -29,7 +29,7 @@ class DebuggingAgent:
         )
         log.info("Model configured (gemini-2.5-pro).")
         
-    def run(self, code_string: str, error_message: str) -> str:
+    def run(self, code_string: str, error_message: str, **kwargs) -> str:
         log.info(f"Received request to fix error: {error_message}")
         
         # --- FIX: 1. System instructions are separated ---

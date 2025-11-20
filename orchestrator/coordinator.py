@@ -126,7 +126,10 @@ class Orchestrator:
         2. 'CodingAgent' is MANDATORY for code tasks.
         3. 'SafetyAgent' is MANDATORY after coding.
         4. IF Complexity is 'COMPLEX': ALWAYS include TestGenerator, ExplainAgent, DocumentationAgent.
-        5. IF Complexity is 'SIMPLE': You MAY skip Explain/Doc agents to save time, unless explicitly requested.
+        5. **CRITICAL SPEED INSTRUCTION**: 
+           You MUST list 'TestGeneratorAgent', 'ExplainAgent', and 'DocumentationAgent' 
+           immediately one after another in the JSON list. 
+           Do not put other agents between them. This allows them to run in parallel.
         6. Use "{{previous_step_output}}" for 'code_string' arguments to pass data.
 
         User Request: "{user_prompt}"

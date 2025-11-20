@@ -29,8 +29,19 @@ class TestGeneratorAgent:
         )
         log.info("Model configured (gemini-2.5-pro).")
         
-    def run(self, code_string: str) -> str:
+    def run(self, code_string: str = "", **kwargs) -> str:
         log.info("Received request to generate tests.")
+
+        # --- FIX: Robustness & Fallback ---
+        # 1. Swallow unexpected arguments like 'prompt' using **kwargs
+        # 2. If code_string is missing, try to find it in kwargs
+        if not code_string:
+            code_string = kwargs.get('code', kwargs.get('prompt', ''))
+            
+        # If we still don't have code (e.g. agent called too early), return a safe error
+        if not code_string:
+            return "Error: No code provided to generate tests for."
+        # ----------------------------------
         
         system_instructions = f"""
         You are a Test Generator Agent.
@@ -65,13 +76,12 @@ class TestGeneratorAgent:
             response = self.model.generate_content(messages)
             unit_tests = response.text
             
-            # --- FIX: Clean up markdown wrappers before returning ---
+            # Clean up markdown wrappers
             unit_tests = unit_tests.strip()
             if unit_tests.startswith("```python"):
                  unit_tests = unit_tests.replace("```python", "").strip()
             if unit_tests.endswith("```"):
                  unit_tests = unit_tests.rstrip("`").strip()
-            # ------------------------------------------------------
             
             log.info("Test generation successful.")
             return unit_tests

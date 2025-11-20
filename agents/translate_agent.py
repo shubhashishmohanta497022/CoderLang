@@ -29,10 +29,19 @@ class TranslateAgent:
         )
         log.info("Model configured (gemini-2.5-pro).")
         
-    def run(self, code_string: str, target_language: str) -> str:
+    def run(self, code_string: str = "", target_language: str = "C++", **kwargs) -> str:
         log.info(f"Received request to translate to {target_language}")
+
+        # --- ROBUSTNESS FIX ---
+        # 1. Swallow unexpected arguments (handled by **kwargs)
+        # 2. Fallback: If code_string is empty, check if the planner sent it as 'prompt' or 'code'
+        if not code_string:
+            code_string = kwargs.get('prompt', kwargs.get('code', ''))
+            
+        if not code_string:
+            return "Error: No code provided to translate."
+        # ----------------------
         
-        # --- FIX: 1. System instructions are separated ---
         system_instructions = f"""
         You are a CoderLang Translation Agent.
         Your sole purpose is to translate the code inside the <input_code> tags
@@ -44,7 +53,6 @@ class TranslateAgent:
         Provide *only* the translated code.
         """
         
-        # --- FIX: 2. User message contains all data parts ---
         user_message = f"""
         <input_code>
         {code_string}
@@ -54,7 +62,6 @@ class TranslateAgent:
         """
 
         try:
-            # --- FIX: 3. Use start_chat to enforce instructions ---
             chat = self.model.start_chat(history=[
                 {'role': 'user', 'parts': [system_instructions]},
                 {'role': 'model', 'parts': ["OK. I am ready to translate the code."]}
@@ -62,7 +69,10 @@ class TranslateAgent:
             
             response = chat.send_message(user_message)
             translated_code = response.text.strip()
+            
+            # Cleanup markdown
             translated_code = translated_code.replace(f"```{target_language.lower()}", "").replace("```", "").strip()
+            
             log.info("Code translation successful.")
             return translated_code
         except Exception as e:

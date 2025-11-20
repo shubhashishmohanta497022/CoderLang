@@ -29,8 +29,12 @@ class SafetyAgent:
         )
         log.info("Model configured (gemini-2.5-pro).")
         
-    def run(self, code_string: str) -> str:
+    def run(self, code_string: str, **kwargs) -> str:
         log.info("Received request to scan code.")
+        
+        # Handle cases where code might be passed as 'prompt' or 'code' by accident
+        if not code_string:
+            code_string = kwargs.get('prompt', kwargs.get('code', ''))
         
         system_instructions = f"""
         You are a CoderLang Safety Agent.
@@ -52,11 +56,6 @@ class SafetyAgent:
         </input_code>
         """
         
-        # --- THE FINAL FIX ---
-        # We will build a list of messages and pass it 
-        # directly to generate_content() instead of using start_chat().
-        # This is more robust.
-        
         messages = [
             {'role': 'user', 'parts': [system_instructions]},
             {'role': 'model', 'parts': ["OK. I am ready to scan the code."]},
@@ -64,7 +63,6 @@ class SafetyAgent:
         ]
         
         try:
-            # Pass the list directly
             response = self.model.generate_content(messages)
             verdict = response.text.strip()
             log.info("Scan successful.")
