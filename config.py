@@ -1,8 +1,14 @@
 import os
 
 # --- MODEL TIERS ---
-FAST_MODEL = "gemini-1.5-flash"    # For Speed & Routing
-SMART_MODEL = "gemini-2.5-pro"     # For Complex Reasoning
+
+# 1. FAST MODEL: Used for Router, Planner, and simple tasks.
+# We use the stable 2.5 Flash as seen in your list.
+FAST_MODEL = "gemini-2.5-flash"    
+
+# 2. SMART MODEL: Used for Coding, Debugging, and Explanation.
+# We use the specialized Gemini 3 Pro Preview you found.
+SMART_MODEL = "gemini-3-pro-preview"     
 
 # Default fallback
 MODEL_NAME = FAST_MODEL 

@@ -1,6 +1,7 @@
 import google.generativeai as genai
 import os
 import logging 
+from config import MODEL_NAME, SAFETY_SETTINGS # Ensure config is used
 
 log = logging.getLogger(__name__)
 
@@ -19,22 +20,24 @@ class CodingAgent:
         genai.configure(api_key=api_key)
         
         self.model = genai.GenerativeModel(
-            model_name='gemini-2.5-pro',
-            safety_settings=[
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
+            model_name=MODEL_NAME,
+            safety_settings=SAFETY_SETTINGS
         )
-        log.info("Model configured (gemini-2.5-pro).")
+        log.info(f"Model configured ({MODEL_NAME}).")
         
-    def run(self, prompt: str) -> str:
+    def run(self, prompt: str, context: str = "") -> str:
         """
         Runs the agent on a given prompt to generate code.
+        Accepts an optional 'context' argument to handle inputs from other agents.
         """
         log.info(f"Received prompt: {prompt}")
         
+        # Combine prompt with context if provided
+        full_user_request = prompt
+        if context:
+            log.info("Context provided, appending to prompt.")
+            full_user_request += f"\n\n[Additional Context/Research]:\n{context}"
+
         system_prompt = f"""
         You are a CoderLang Coding Agent.
         Your sole purpose is to write clean, effective, and correct 
@@ -46,20 +49,19 @@ class CodingAgent:
         Provide *only* the raw, runnable Python code.
         Do NOT include any explanations, comments, or Markdown wrappers (e.g., '```python').
         
-        User Request: {prompt}
+        User Request: {full_user_request}
         """
         
         try:
             response = self.model.generate_content(system_prompt)
             generated_code = response.text
             
-            # --- FIX: Clean up markdown wrappers before returning ---
+            # Clean up markdown wrappers before returning
             generated_code = generated_code.strip()
             if generated_code.startswith("```python"):
                  generated_code = generated_code.replace("```python", "").strip()
             if generated_code.endswith("```"):
                  generated_code = generated_code.rstrip("`").strip()
-            # ----------------------------------------------------
 
             log.info("Code generation successful.")
             return generated_code

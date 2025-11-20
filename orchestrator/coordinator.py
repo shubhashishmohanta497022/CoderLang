@@ -3,7 +3,7 @@ import os
 import json
 import logging
 import concurrent.futures
-from config import FAST_MODEL, SMART_MODEL, SAFETY_SETTINGS
+from config import FAST_MODEL, SMART_MODEL, SAFETY_SETTINGS, MODEL_NAME # Ensure MODEL_NAME is imported
 
 # --- Import all Agents ---
 from agents.coding_agent import CodingAgent
@@ -34,16 +34,16 @@ class Orchestrator:
         
         genai.configure(api_key=api_key)
         
-        # Default to FAST model for Planning/Routing
+        # Use the Configured Model
         self.planner_model = genai.GenerativeModel(
-            model_name=FAST_MODEL,
+            model_name=MODEL_NAME, # Updated to use config
             safety_settings=SAFETY_SETTINGS
         )
-        log.info(f"Planner/Router initialized using {FAST_MODEL}.")
+        log.info(f"Planner/Router initialized using {MODEL_NAME}.")
 
         self.memory = MemoryStore()
         
-        # Initialize all agents (Defaulting to whatever config.MODEL_NAME was, usually Flash)
+        # Initialize all agents 
         self.agents = {
             "CodingAgent": CodingAgent(),
             "SafetyAgent": SafetyAgent(),
@@ -62,20 +62,18 @@ class Orchestrator:
         """
         if complexity == "COMPLEX":
             log.info(f"🧠 SWITCHING TO SMART MODE ({SMART_MODEL}) for Coding/Debugging.")
-            # We hot-swap the model object inside the specific agents
             smart_model_obj = genai.GenerativeModel(model_name=SMART_MODEL, safety_settings=SAFETY_SETTINGS)
             
-            # Only upgrade the "Brain" agents
             self.agents["CodingAgent"].model = smart_model_obj
             self.agents["DebuggingAgent"].model = smart_model_obj
-            self.agents["ExplainAgent"].model = smart_model_obj # Optional: Explain in detail
+            self.agents["ExplainAgent"].model = smart_model_obj 
         else:
             log.info(f"⚡ REMAINING IN FAST MODE ({FAST_MODEL}) for simple task.")
 
     def generate_plan(self, user_prompt: str):
         log.info(f"Analyzing request: '{user_prompt}'")
         
-        # --- 1. ROUTER STEP: Determine Complexity ---
+        # --- 1. ROUTER STEP ---
         try:
             router_prompt = f"""
             Analyze this coding request: "{user_prompt}"
@@ -87,7 +85,6 @@ class Orchestrator:
             complexity = router_response.text.strip().upper()
             if "COMPLEX" not in complexity: complexity = "SIMPLE"
             
-            # Apply the model switch
             self._optimize_agent_models(complexity)
             
         except Exception as e:
@@ -98,13 +95,31 @@ class Orchestrator:
         memory_context = self.memory.get_all_context()
         agent_names = list(self.agents.keys())
         
+        # --- FIX: EXPLICIT JSON SCHEMA ADDED BELOW ---
         system_prompt = f"""
         You are the "brain" of a multi-agent system.
-        Create a step-by-step JSON plan.
+        Create a step-by-step JSON plan to fulfill the user request.
         
-        Agents: {agent_names}
+        Available Agents: {agent_names}
         Context: {memory_context}
         Complexity Level: {complexity}
+        
+        RESPONSE FORMAT:
+        You MUST return a JSON list of objects. Each object must have exactly these keys:
+        - "agent": The name of the agent to call (must be one of the Available Agents).
+        - "args": A dictionary of arguments to pass to the agent's run method.
+        
+        EXAMPLE:
+        [
+            {{
+                "agent": "ResearchAgent",
+                "args": {{ "query": "how to use pandas" }}
+            }},
+            {{
+                "agent": "CodingAgent",
+                "args": {{ "prompt": "write a pandas script", "context": "{{previous_step_output}}" }}
+            }}
+        ]
         
         RULES:
         1. Start with 'ResearchAgent' only if asking for specific knowledge.
@@ -112,16 +127,21 @@ class Orchestrator:
         3. 'SafetyAgent' is MANDATORY after coding.
         4. IF Complexity is 'COMPLEX': ALWAYS include TestGenerator, ExplainAgent, DocumentationAgent.
         5. IF Complexity is 'SIMPLE': You MAY skip Explain/Doc agents to save time, unless explicitly requested.
-        6. Use "{{previous_step_output}}" for 'code_string' arguments.
+        6. Use "{{previous_step_output}}" for 'code_string' arguments to pass data.
 
         User Request: "{user_prompt}"
         
-        Generate JSON list.
+        Generate ONLY the JSON list.
         """
         
         try:
             response = self.planner_model.generate_content(system_prompt)
-            plan_json = response.text.strip().replace("```json", "").replace("```", "").strip()
+            plan_json = response.text.strip()
+            
+            # Clean up markdown just in case
+            if plan_json.startswith("```"):
+                plan_json = plan_json.replace("```json", "").replace("```", "")
+            
             return json.loads(plan_json)
         except Exception as e:
             log.error(f"FAILED to generate plan! Error: {e}")
@@ -134,11 +154,19 @@ class Orchestrator:
         research_context = ""
         executed_indices = set()
         
+        if not plan:
+            return {"error": "Empty plan generated."}
+
         for i, step in enumerate(plan):
             if i in executed_indices: continue
             
-            agent_name = step["agent"]
-            
+            # --- ERROR SOURCE WAS HERE (step["agent"]) ---
+            try:
+                agent_name = step["agent"]
+            except KeyError:
+                log.error(f"Invalid plan format. Step missing 'agent' key: {step}")
+                continue
+
             # --- PARALLELIZATION LOGIC ---
             independent_agents = ["ExplainAgent", "TestGeneratorAgent", "DocumentationAgent", "TranslateAgent"]
             parallel_candidates = []
@@ -146,7 +174,7 @@ class Orchestrator:
             if agent_name in independent_agents:
                 for j in range(i + 1, len(plan)):
                     other_step = plan[j]
-                    if other_step["agent"] in independent_agents and other_step["agent"] != agent_name:
+                    if other_step.get("agent") in independent_agents and other_step.get("agent") != agent_name:
                         parallel_candidates.append((j, other_step))
             
             if parallel_candidates:
@@ -200,8 +228,12 @@ class Orchestrator:
                 if isinstance(v, str) and "previous_step_output" in v:
                     args_copy[k] = original_code if original_code else ""
             
-            if original_code and "code_string" in args_copy:
-                args_copy["code_string"] = original_code
+            downstream_agents = ["ExplainAgent", "DocumentationAgent", "TestGeneratorAgent", "SafetyAgent", "TranslateAgent"]
+            
+            if original_code and agent_name in downstream_agents:
+                # We verify if 'code_string' is missing or empty in args, then inject it
+                if "code_string" not in args_copy or not args_copy["code_string"]:
+                    args_copy["code_string"] = original_code
 
             try:
                 output = agent.run(**args_copy)

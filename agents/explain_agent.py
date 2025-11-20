@@ -29,8 +29,12 @@ class ExplainAgent:
         )
         log.info("Model configured (gemini-2.5-pro).")
         
-    def run(self, code_string: str) -> str:
+    def run(self, code_string: str = "", **kwargs) -> str:
         log.info("Received request to explain code.")
+
+        topic = kwargs.get('topic', '')
+        if not code_string and topic:
+            code_string = f"Concept: {topic}"
         
         system_instructions = """
         You are a CoderLang Explanation Agent.
