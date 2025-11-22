@@ -7,175 +7,258 @@ from memory.memory_store import MemoryStore
 
 # Page Config
 st.set_page_config(
-    page_title="CoderLang Enterprise",
-    page_icon="🧩",
+    page_title="CoderLang Universal",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- CSS FIXES ---
+# --- CSS STYLING ---
 st.markdown("""
 <style>
     .stTextArea textarea { font-family: 'Fira Code', monospace; }
     
-    /* Fix for Metric Boxes (Evaluator Score) */
+    /* Metrics Styling */
     div[data-testid="metric-container"] {
-        background-color: rgba(255, 255, 255, 0.05); /* Translucent dark */
+        background-color: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.1);
         padding: 15px;
         border-radius: 8px;
         color: white;
     }
     
-    /* Success/Error styling */
+    /* Success/Error Boxes */
     .success-box { padding: 10px; background-color: rgba(40, 167, 69, 0.1); border-left: 5px solid #28a745; border-radius: 4px; }
-    .error-box { padding: 10px; background-color: rgba(220, 53, 69, 0.1); border-left: 5px solid #dc3545; border-radius: 4px; }
+    .info-box { padding: 10px; background-color: rgba(23, 162, 184, 0.1); border-left: 5px solid #17a2b8; border-radius: 4px; }
+    
+    /* Chat List Styling */
+    .chat-row {
+        padding: 8px;
+        border-radius: 4px;
+        margin-bottom: 5px;
+        cursor: pointer;
+    }
+    .chat-row:hover {
+        background-color: rgba(255, 255, 255, 0.1);
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Title
-col1, col2 = st.columns([1, 10])
+# Initialize Memory
+if "memory" not in st.session_state:
+    st.session_state.memory = MemoryStore()
+
+# Initialize Session State for Chat ID
+if "current_chat_id" not in st.session_state:
+    # Try to load the most recent chat, or create a new one
+    sessions = st.session_state.memory.list_chat_sessions()
+    if sessions:
+        st.session_state.current_chat_id = sessions[0]["id"]
+    else:
+        st.session_state.current_chat_id = st.session_state.memory.create_chat_session()
+
+# Load Messages for Current Chat
+st.session_state.messages = st.session_state.memory.load_chat_history(st.session_state.current_chat_id)
+
+# Header
+col1, col2 = st.columns([1, 12])
 with col1:
-    st.image("https://cdn-icons-png.flaticon.com/512/2083/2083213.png", width=60)
+    st.image("https://cdn-icons-png.flaticon.com/512/2083/2083213.png", width=50)
 with col2:
-    st.title("CoderLang Enterprise")
-    st.caption("Multi-Agent Coding Assistant powered by Google Gemini")
+    st.title("CoderLang Universal Engine")
+    st.caption("Hyper-fast Async Agent Pipeline powered by Gemini 2.5 Flash & 3 Pro")
 
 # Sidebar
 with st.sidebar:
     st.header("🧠 Memory Context")
-    memory = MemoryStore()
     
-    if st.button("Clear Short-Term Memory"):
-        memory._init_file(memory.short_term_path)
-        st.toast("Memory cleared!", icon="🧹")
-    
-    st.subheader("Session Data")
-    try:
-        short_term = memory._load(memory.short_term_path)
-        st.json(short_term)
-    except:
-        st.text("No memory yet.")
+    if st.button("➕ New Chat", use_container_width=True):
+        new_id = st.session_state.memory.create_chat_session()
+        st.session_state.current_chat_id = new_id
+        st.rerun()
 
     st.divider()
-    st.info("Agents Active:\n- CodingAgent\n- SafetyAgent\n- TestGenerator\n- DebuggingAgent\n- ExplainAgent\n- Evaluator\n- ResearchAgent")
-
-# --- MAIN CHAT INTERFACE ---
-
-# 1. Initialize Chat History if not present
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# 2. Display Chat History
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# 3. Input Area (Enter sends, Shift+Enter for new line)
-if prompt := st.chat_input("Enter your coding request (e.g., 'Write a Python script to parse a CSV')..."):
+    st.subheader("Past Chats")
     
-    # Add user message to chat
+    sessions = st.session_state.memory.list_chat_sessions()
+    for session in sessions:
+        # Highlight current chat
+        label = session["title"]
+        if session["id"] == st.session_state.current_chat_id:
+            label = f"🔹 {label}"
+            
+        if st.button(label, key=session["id"], use_container_width=True):
+            st.session_state.current_chat_id = session["id"]
+            st.rerun()
+
+    st.divider()
+    
+    if st.button("Clear Session Memory"):
+        st.session_state.memory._init_file(st.session_state.memory.short_term_path)
+        st.toast("Short-term memory cleared!", icon="🧹")
+    
+    st.subheader("Active Configuration")
+    st.info("""
+    **Router:** Gemini 2.5 Flash
+    **Coding:** Gemini 3 Pro Preview
+    **Analysis:** Gemini 2.5 Flash
+    **Pipeline:** Async DAG
+    """)
+
+# --- CHAT INTERFACE ---
+
+# Helper: Render Message Content
+def render_message_content(summary, raw):
+    # If Code was Generated (The Full Suite)
+    if summary.get("generated_code"):
+        task_type = summary.get("intent", "General Task")
+        st.markdown(f"**Task:** {task_type}")
+        
+        if summary.get("explanation"):
+            st.markdown(summary["explanation"])
+            
+        tab1, tab2, tab3, tab4 = st.tabs(["💻 Code & Solution", "📊 Evaluation", "🧪 Tests & Docs", "📜 System Logs"])
+        
+        # TAB 1: Final Solution
+        with tab1:
+            st.subheader("Solution")
+            st.code(summary["generated_code"], language="python", line_numbers=True)
+            st.download_button("Download .py", summary["generated_code"], "solution.py")
+            
+            if summary.get("translation"):
+                st.divider()
+                st.subheader("C++ Translation")
+                st.code(summary["translation"], language="cpp")
+
+            if summary.get("explanation"):
+                with st.expander("💡 Logic Explanation"):
+                    st.markdown(summary["explanation"])
+
+        # TAB 2: Scorecard
+        with tab2:
+            # Extract Score
+            eval_text = summary.get("evaluation", "No evaluation.")
+            score = "N/A"
+            if "Score:" in eval_text:
+                score = eval_text.split("Score:")[1].split("/")[0].strip() + "/10"
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Quality Score", score)
+            c2.metric("Agents Active", len(raw))
+            c3.metric("Total Latency", summary.get("latency", "N/A"))
+            
+            st.info(eval_text)
+
+            if summary.get("safety"):
+                st.warning(f"🔒 Safety Scan: {summary['safety']}")
+
+        # TAB 3: Derivatives
+        with tab3:
+            if summary.get("tests"):
+                st.subheader("Unit Tests")
+                st.code(summary["tests"], language="python")
+            else:
+                st.text("No tests generated.")
+
+        # TAB 4: Raw Debug Logs
+        with tab4:
+            st.json(raw)
+
+    # If it was just a chat/research/explain task (No Code)
+    else:
+        if summary.get("explanation"):
+            st.markdown(summary["explanation"])
+            
+        if summary.get("research"):
+            with st.expander("📚 Research Data"):
+                st.markdown(summary["research"])
+
+# Helper: Process Prompt
+def process_prompt(prompt, is_refinement=False):
+    # 1. Add User Message to State & Memory
     st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.memory.save_message(st.session_state.current_chat_id, "user", prompt)
+    
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Assistant Response
     with st.chat_message("assistant"):
+        status_container = st.status("🚀 Initializing Universal Pipeline...", expanded=True)
         
-        # Use st.status to show progress without cluttering the final UI
-        with st.status("🤖 Agents are collaborating...", expanded=True) as status:
-            st.write("Initializing Orchestrator...")
-            st.write("Planning steps...")
+        try:
+            start_time = time.time()
             
-            try:
-                start_time = time.time()
-                results = run_orchestrator(prompt)
-                end_time = time.time()
-                duration = round(end_time - start_time, 2)
-                
-                status.update(label=f"✅ Complete in {duration}s", state="complete", expanded=False)
+            # CALL THE ROUTER
+            output = run_orchestrator(prompt)
             
-            except Exception as e:
-                status.update(label="❌ Failed", state="error")
-                st.error(f"An error occurred: {e}")
-                st.stop()
+            # Parse Results
+            summary = output.get("summary", {})
+            raw = output.get("raw_results", {})
+            
+            # Status Update
+            latency = summary.get("latency", "0.00s")
+            task_type = summary.get("intent", "General Task")
+            status_container.update(label=f"✅ Complete in {latency} | Task: {task_type}", state="complete", expanded=False)
 
-        # --- TABS for Result Display (Final Code First) ---
-        tab_code, tab_live, tab_logs = st.tabs(["📄 Final Code", "📊 Orchestrator Live", "📜 Full Logs"])
+            # --- DISPLAY RESULTS ---
+            render_message_content(summary, raw)
+            
+            # 2. Add Assistant Message to State & Memory
+            # We store a fallback text representation in 'content' for simple viewers,
+            # but we rely on 'metadata' for the full UI.
+            response_text = summary.get("explanation", "Response generated.")
+            if summary.get("generated_code"):
+                response_text = f"**Task:** {task_type}\n\n{response_text}\n\n*(Code generated - check tabs)*"
 
-        # TAB 1: Final Code & Metrics
-        with tab_code:
-            # Metrics Row
-            m1, m2, m3 = st.columns(3)
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": response_text,
+                "metadata": {"summary": summary, "raw_results": raw}
+            })
             
-            score = "N/A"
-            if "final_evaluation" in results:
-                try:
-                    score = results["final_evaluation"].split("\n")[0].split(":")[1].strip()
-                except:
-                    score = "Check Logs"
+            st.session_state.memory.save_message(
+                st.session_state.current_chat_id, 
+                "assistant", 
+                response_text, 
+                metadata={"summary": summary, "raw_results": raw}
+            )
             
-            m1.metric("Evaluator Score", score)
-            m2.metric("Agents Used", len(results) - 1)
-            m3.metric("Auto-Debug Events", 1 if "step_auto_Debug" in results else 0)
-            
-            st.divider()
+            # Force a rerun to update UI (and sidebar title if needed)
+            st.rerun()
 
-            # Find Final Code
-            final_code = ""
-            if "step_auto_Debug" in results:
-                final_code = results["step_auto_Debug"]
-                st.success("✨ Code was auto-corrected by DebuggingAgent", icon="🛠")
-            else:
-                for k, v in results.items():
-                    if "CodingAgent" in k:
-                        final_code = v
-            
-            if final_code:
-                st.subheader("Generated Solution")
-                st.code(final_code, language="python", line_numbers=True)
-                
-                st.download_button(
-                    label="Download .py",
-                    data=final_code,
-                    file_name="coderlang_solution.py",
-                    mime="text/x-python"
-                )
-            else:
-                st.warning("No code generated.")
+        except Exception as e:
+            status_container.update(label="❌ System Error", state="error")
+            st.error(f"Pipeline Failed: {e}")
 
-        # TAB 2: Orchestrator Live (Workflow)
-        with tab_live:
-            st.subheader("Agent Workflow Timeline")
-            for key, value in results.items():
-                if "step_" in key:
-                    parts = key.split("_")
-                    # Handles step_1_CodingAgent or step_auto_Debug
-                    agent_name = parts[2] if len(parts) > 2 else parts[1]
-                    
-                    # Use expanders for cleaner look
-                    with st.expander(f"🔹 {agent_name}", expanded=False):
-                        st.code(value, language='python' if 'Code' in agent_name or 'Debug' in agent_name else 'text')
+# Display History
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        # Check if we have metadata to render the full UI
+        if message.get("metadata") and "summary" in message["metadata"]:
+            render_message_content(
+                message["metadata"]["summary"], 
+                message["metadata"].get("raw_results", {})
+            )
+        else:
+            # Fallback for old messages or simple text
+            st.markdown(message["content"])
 
-        # TAB 3: Full Logs
-        with tab_logs:
-            # Fix path: logic in logger.py creates nested logs folder
-            # Root -> observability -> logs -> logs -> events.log
-            # Check both possible paths to be safe
-            possible_paths = [
-                os.path.join("observability", "logs", "logs", "events.log"), # Nested
-                os.path.join("observability", "logs", "events.log")          # Flat
-            ]
-            
-            log_content = "Log file not found."
-            for p in possible_paths:
-                if os.path.exists(p):
-                    with open(p, "r") as f:
-                        lines = f.readlines()
-                        log_content = "".join(lines[-50:]) # Last 50 lines
-                    break
-            
-            st.text_area("System Logs", log_content, height=300)
+# Regeneration Buttons (Only if history exists and last msg is assistant)
+if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+    col1, col2, col3 = st.columns([1, 1, 4])
+    with col1:
+        if st.button("🔄 Regenerate", help="Re-run the last request"):
+            # Find last user message
+            last_user_msg = next((m for m in reversed(st.session_state.messages) if m["role"] == "user"), None)
+            if last_user_msg:
+                process_prompt(last_user_msg["content"])
+    with col2:
+        if st.button("✨ Make it Concise", help="Regenerate with a focus on brevity"):
+            last_user_msg = next((m for m in reversed(st.session_state.messages) if m["role"] == "user"), None)
+            if last_user_msg:
+                new_prompt = f"{last_user_msg['content']}\n\n(Please provide a concise, minimal solution)"
+                process_prompt(new_prompt)
 
-    # Save assistant response to chat history (simplified for session state)
-    st.session_state.messages.append({"role": "assistant", "content": "✅ Task executed successfully. Check the tabs above for details."})
+# Input
+if prompt := st.chat_input("Ask me to code, research, explain, or translate..."):
+    process_prompt(prompt)

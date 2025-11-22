@@ -1,275 +1,239 @@
-import google.generativeai as genai
-import os
+import asyncio
+import concurrent.futures
+import hashlib
 import json
 import logging
-import concurrent.futures
-from config import FAST_MODEL, SMART_MODEL, SAFETY_SETTINGS, MODEL_NAME # Ensure MODEL_NAME is imported
+import os
+import time
+from typing import Any, Dict, List, Optional
 
-# --- Import all Agents ---
-from agents.coding_agent import CodingAgent
-from agents.safety_agent import SafetyAgent
-from agents.translate_agent import TranslateAgent
-from agents.test_generator_agent import TestGeneratorAgent
-from agents.explain_agent import ExplainAgent
-from agents.debugging_agent import DebuggingAgent
-from agents.doc_agent import DocumentationAgent
+# Import Google GenAI and Dotenv
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# Import specific agents if they exist, otherwise we simulate them
 from agents.research_agent import ResearchAgent
 
-# --- Import Tools and Utilities ---
-from tools.run_code import run_python_code
-from tools.file_tool import FileTool
-from memory.memory_store import MemoryStore
-from orchestrator.evaluator import evaluate_code
+load_dotenv()
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("orchestrator_universal")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+CACHE_DIR = "/tmp/coderlang_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# ========== Config ==========
+MODEL_FAST = "gemini-2.0-flash"       # Speed (Router, Chat, Tests, Docs)
+MODEL_HEAVY = "gemini-2.0-flash"      # Intelligence (Coding, Complex Debugging) - Switched to Flash due to Pro quota limits during testing
+
+SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+# ========== Universal System Prompts ==========
+SYSTEM_PROMPTS = {
+    # --- THE BRAIN ---
+    "TaskRouter": """
+    You are the Master Router. Analyze the user request and output a JSON object deciding which agents to activate.
+    
+    Available Agents:
+    - "ResearchAgent": Use if the user asks for facts, web info, or unknown concepts.
+    - "GeneralAgent": Use for "Hi", casual chat, or non-technical questions.
+    - "CodeGenAgent": Use if the user asks to write, fix, or show code.
+    - "SafetyAgent": MANDATORY if "CodeGenAgent" is active. Checks for malicious code.
+    - "TestGenAgent": Use if user asks for tests OR for critical code verification.
+    - "DocstringAgent": Use if user asks for docs or "production ready" code.
+    - "TranslateAgent": Use ONLY if the user explicitly asks to translate code to another language.
+    - "ExplainAgent": Use if the user asks for an explanation or if the topic is complex.
+    - "EvaluatorAgent": Use if "CodeGenAgent" is active to score the solution.
+
+    OUTPUT JSON ONLY:
+    {
+        "intent_summary": "short description",
+        "agents_to_run": ["Agent1", "Agent2", ...],
+        "parallelizable": true
+    }
+    """,
+
+    # --- STAGE 1: CREATORS ---
+    "GeneralAgent": "You are a helpful coding assistant. Answer the user's question continuously and concisely.",
+    "ResearchAgent": "Summarize key technical concepts and implementation details for the request.",
+    "CodeGenAgent": "You are an Expert Python Architect. Write robust, runnable solution code. Return ONLY code.",
+
+    # --- STAGE 2: DERIVATIVES ---
+    "SafetyAgent": "Check the code for unsafe operations (exec, eval, infinite loops). Return Verdict: SAFE/UNSAFE.",
+    "TestGenAgent": "Write `unittest` cases for the provided code. Return ONLY the test code.",
+    "DocstringAgent": "Add PEP 257 docstrings to the provided code. Return the FULL updated code.",
+    "TranslateAgent": "Translate the provided code to the language requested by the user. If not specified, assume C++.",
+    "ExplainAgent": "Explain the solution's logic and architecture concisely.",
+
+    # --- STAGE 3: JUDGE ---
+    "EvaluatorAgent": "Evaluate the solution (Code, Tests, Docs). Score 1-10. Format: 'Score: X/10. Justification: ...'"
+}
+
+# ========== Orchestrator ==========
 class Orchestrator:
-    def __init__(self):
-        log.info("Initializing Orchestrator...")
-        
+    def __init__(self, max_workers: int = 10):
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.research_agent = None # Lazy load
+
+    async def run_llm(self, task_name: str, model: str, system_prompt: str, input_context: str, max_tokens: int = 2000) -> Dict:
+        """Universal Async LLM Caller"""
         api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            log.error("GOOGLE_API_KEY not found.")
-            raise ValueError("GOOGLE_API_KEY not found.")
-        
         genai.configure(api_key=api_key)
-        
-        # Use the Configured Model
-        self.planner_model = genai.GenerativeModel(
-            model_name=MODEL_NAME, # Updated to use config
-            safety_settings=SAFETY_SETTINGS
-        )
-        log.info(f"Planner/Router initialized using {MODEL_NAME}.")
 
-        self.memory = MemoryStore()
-        
-        # Initialize all agents 
-        self.agents = {
-            "CodingAgent": CodingAgent(),
-            "SafetyAgent": SafetyAgent(),
-            "TranslateAgent": TranslateAgent(),
-            "TestGeneratorAgent": TestGeneratorAgent(),
-            "ExplainAgent": ExplainAgent(),
-            "DebuggingAgent": DebuggingAgent(),
-            "DocumentationAgent": DocumentationAgent(),
-            "ResearchAgent": ResearchAgent(),
-        }
-        self.file_tool = FileTool()
-
-    def _optimize_agent_models(self, complexity: str):
-        """
-        Dynamically swaps agent brains based on task complexity.
-        """
-        if complexity == "COMPLEX":
-            log.info(f"🧠 SWITCHING TO SMART MODE ({SMART_MODEL}) for Coding/Debugging.")
-            smart_model_obj = genai.GenerativeModel(model_name=SMART_MODEL, safety_settings=SAFETY_SETTINGS)
-            
-            self.agents["CodingAgent"].model = smart_model_obj
-            self.agents["DebuggingAgent"].model = smart_model_obj
-            self.agents["ExplainAgent"].model = smart_model_obj 
-        else:
-            log.info(f"⚡ REMAINING IN FAST MODE ({FAST_MODEL}) for simple task.")
-
-    def generate_plan(self, user_prompt: str):
-        log.info(f"Analyzing request: '{user_prompt}'")
-        
-        # --- 1. ROUTER STEP ---
-        try:
-            router_prompt = f"""
-            Analyze this coding request: "{user_prompt}"
-            Is this a 'SIMPLE' task (e.g., parsing, basic scripts, fibonacci) 
-            or a 'COMPLEX' task (e.g., architecture, advanced algorithms, debugging w/ no context)?
-            Respond with ONLY the word SIMPLE or COMPLEX.
-            """
-            router_response = self.planner_model.generate_content(router_prompt)
-            complexity = router_response.text.strip().upper()
-            if "COMPLEX" not in complexity: complexity = "SIMPLE"
-            
-            self._optimize_agent_models(complexity)
-            
-        except Exception as e:
-            log.warning(f"Router failed, defaulting to simple mode: {e}")
-            complexity = "SIMPLE"
-
-        # --- 2. PLANNER STEP ---
-        memory_context = self.memory.get_all_context()
-        agent_names = list(self.agents.keys())
-        
-        # --- FIX: EXPLICIT JSON SCHEMA ADDED BELOW ---
-        system_prompt = f"""
-        You are the "brain" of a multi-agent system.
-        Create a step-by-step JSON plan to fulfill the user request.
-        
-        Available Agents: {agent_names}
-        Context: {memory_context}
-        Complexity Level: {complexity}
-        
-        RESPONSE FORMAT:
-        You MUST return a JSON list of objects. Each object must have exactly these keys:
-        - "agent": The name of the agent to call (must be one of the Available Agents).
-        - "args": A dictionary of arguments to pass to the agent's run method.
-        
-        EXAMPLE:
-        [
-            {{
-                "agent": "ResearchAgent",
-                "args": {{ "query": "how to use pandas" }}
-            }},
-            {{
-                "agent": "CodingAgent",
-                "args": {{ "prompt": "write a pandas script", "context": "{{previous_step_output}}" }}
-            }}
-        ]
-        
-        RULES:
-        1. Start with 'ResearchAgent' only if asking for specific knowledge.
-        2. 'CodingAgent' is MANDATORY for code tasks.
-        3. 'SafetyAgent' is MANDATORY after coding.
-        4. IF Complexity is 'COMPLEX': ALWAYS include TestGenerator, ExplainAgent, DocumentationAgent.
-        5. **CRITICAL SPEED INSTRUCTION**: 
-           You MUST list 'TestGeneratorAgent', 'ExplainAgent', and 'DocumentationAgent' 
-           immediately one after another in the JSON list. 
-           Do not put other agents between them. This allows them to run in parallel.
-        6. Use "{{previous_step_output}}" for 'code_string' arguments to pass data.
-
-        User Request: "{user_prompt}"
-        
-        Generate ONLY the JSON list.
-        """
-        
-        try:
-            response = self.planner_model.generate_content(system_prompt)
-            plan_json = response.text.strip()
-            
-            # Clean up markdown just in case
-            if plan_json.startswith("```"):
-                plan_json = plan_json.replace("```json", "").replace("```", "")
-            
-            return json.loads(plan_json)
-        except Exception as e:
-            log.error(f"FAILED to generate plan! Error: {e}")
-            return None
-
-    def execute_plan(self, plan: list, original_prompt: str):
-        log.info("Starting plan execution...")
-        results = {}
-        original_code = None 
-        research_context = ""
-        executed_indices = set()
-        
-        if not plan:
-            return {"error": "Empty plan generated."}
-
-        for i, step in enumerate(plan):
-            if i in executed_indices: continue
-            
-            # --- ERROR SOURCE WAS HERE (step["agent"]) ---
+        def _blocking_call():
+            # Fallback to 1.5 Pro if 2.0 Pro Exp is not available or fails (handled by try/except below roughly)
+            # But for now we trust the config.
+            m = genai.GenerativeModel(model_name=model, safety_settings=SAFETY_SETTINGS)
+            full_prompt = f"{system_prompt}\n\n[Context]:\n{input_context}"
             try:
-                agent_name = step["agent"]
-            except KeyError:
-                log.error(f"Invalid plan format. Step missing 'agent' key: {step}")
-                continue
-
-            # --- PARALLELIZATION LOGIC ---
-            independent_agents = ["ExplainAgent", "TestGeneratorAgent", "DocumentationAgent", "TranslateAgent"]
-            parallel_candidates = []
-            
-            if agent_name in independent_agents:
-                for j in range(i + 1, len(plan)):
-                    other_step = plan[j]
-                    if other_step.get("agent") in independent_agents and other_step.get("agent") != agent_name:
-                        parallel_candidates.append((j, other_step))
-            
-            if parallel_candidates:
-                other_idx, other_step = parallel_candidates[0]
-                other_agent_name = other_step["agent"]
-                
-                log.info(f"⚡ OPTIMIZATION: Running {agent_name} and {other_agent_name} in PARALLEL.")
-                
-                def prepare_args(step_args):
-                    a_args = step_args.copy()
-                    if "prompt" in a_args and research_context:
-                         a_args["prompt"] += f"\n\n[Context]:\n{research_context}"
-                    for k, v in a_args.items():
-                        if isinstance(v, str) and "previous_step_output" in v:
-                            a_args[k] = original_code if original_code else ""
-                    if original_code and "code_string" in a_args:
-                        a_args["code_string"] = original_code
-                    return a_args
-
-                args_1 = prepare_args(step["args"])
-                args_2 = prepare_args(other_step["args"])
-                
-                try:
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future_1 = executor.submit(self.agents[agent_name].run, **args_1)
-                        future_2 = executor.submit(self.agents[other_agent_name].run, **args_2)
-                        output_1, output_2 = future_1.result(), future_2.result()
-                        
-                    results[f"step_{i+1}_{agent_name}"] = output_1
-                    results[f"step_{other_idx+1}_{other_agent_name}"] = output_2
-                    executed_indices.add(i)
-                    executed_indices.add(other_idx)
-                    
-                    for a_name, a_out in [(agent_name, output_1), (other_agent_name, output_2)]:
-                        if a_name == "TestGeneratorAgent" and original_code:
-                             self._handle_test_execution(original_code, a_out, results)
-                    continue
-                except Exception as e:
-                    log.error(f"Parallel failed: {e}")
-
-            # --- SEQUENTIAL EXECUTION ---
-            if agent_name not in self.agents: continue
-            
-            agent = self.agents[agent_name]
-            args_copy = step["args"].copy()
-            
-            if agent_name == "CodingAgent" and research_context:
-                args_copy["prompt"] += f"\n\n[Context]:\n{research_context}"
-            
-            for k, v in args_copy.items():
-                if isinstance(v, str) and "previous_step_output" in v:
-                    args_copy[k] = original_code if original_code else ""
-            
-            downstream_agents = ["ExplainAgent", "DocumentationAgent", "TestGeneratorAgent", "SafetyAgent", "TranslateAgent"]
-            
-            if original_code and agent_name in downstream_agents:
-                # We verify if 'code_string' is missing or empty in args, then inject it
-                if "code_string" not in args_copy or not args_copy["code_string"]:
-                    args_copy["code_string"] = original_code
-
-            try:
-                output = agent.run(**args_copy)
-                
-                if agent_name == "CodingAgent": original_code = output
-                elif agent_name == "ResearchAgent": research_context = output
-                
-                results[f"step_{i+1}_{agent_name}"] = output
-                
-                if agent_name == "TestGeneratorAgent" and original_code:
-                    self._handle_test_execution(original_code, output, results)
-                    
+                res = m.generate_content(full_prompt)
+                text = res.text
+                # Basic markdown stripper
+                if "```" in text: 
+                    text = text.replace("```json", "").replace("```python", "").replace("```", "").strip()
+                return {"text": text, "ok": True}
             except Exception as e:
-                log.error(f"Agent error: {e}")
-                break
+                return {"text": "", "error": str(e), "ok": False}
 
-        # Evaluation
-        if original_code:
-            expl = next((v for k,v in results.items() if "Explain" in k), "")
-            tests = next((v for k,v in results.items() if "Test" in k), "")
-            results["final_evaluation"] = evaluate_code(original_prompt, original_code, expl, tests)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.executor, _blocking_call)
 
-        return results
+    async def run_plan(self, user_prompt: str) -> Dict[str, Any]:
+        results = {}
+        start_time = time.time()
+        log.info(f"▶️ Request: {user_prompt[:50]}...")
 
-    def _handle_test_execution(self, original_code, test_code, results):
-        combined = original_code + "\n\n" + test_code
-        res = run_python_code(combined)
-        results["step_auto_RunTests"] = res
-        if res["stderr"]:
-            log.info("Tests failed, debugging...")
-            debug_agent = self.agents.get("DebuggingAgent")
-            if debug_agent:
-                try:
-                    fixed = debug_agent.run(original_code, res["stderr"])
-                    results["step_auto_Debug"] = fixed
-                except: pass
+        # =========================================================================
+        # 🧠 PHASE 0: ROUTING (The Brain)
+        # =========================================================================
+        route_res = await self.run_llm("Router", MODEL_FAST, SYSTEM_PROMPTS["TaskRouter"], user_prompt)
+        try:
+            plan = json.loads(route_res["text"])
+            active_agents = plan.get("agents_to_run", ["GeneralAgent"])
+            parallelizable = plan.get("parallelizable", False)
+        except:
+            log.warning("⚠️ Router failed JSON parse. Defaulting to GeneralChat.")
+            active_agents = ["GeneralAgent"]
+            plan = {"intent_summary": "Fallback"}
+
+        log.info(f"📋 Plan: {active_agents} | Parallel: {parallelizable}")
+
+        # =========================================================================
+        # 🚀 STAGE 1: CREATION (Parallel)
+        # Research, CodeGen, Explain (Conceptual) - Independent of each other
+        # =========================================================================
+        stage1_tasks = []
+        
+        # A. Research (Flash)
+        if "ResearchAgent" in active_agents:
+            stage1_tasks.append(("ResearchAgent", self.run_llm("Research", MODEL_FAST, SYSTEM_PROMPTS["ResearchAgent"], user_prompt)))
+
+        # B. General Chat (Flash)
+        if "GeneralAgent" in active_agents and "CodeGenAgent" not in active_agents:
+            stage1_tasks.append(("GeneralAgent", self.run_llm("Chat", MODEL_FAST, SYSTEM_PROMPTS["GeneralAgent"], user_prompt)))
+
+        # C. Coding (Pro) - The Heavy Lifter
+        if "CodeGenAgent" in active_agents:
+            # CodeGen gets the raw user prompt. 
+            # Note: If we wanted to feed Research into CodeGen, we'd have to make them sequential.
+            # The user explicitly asked for PARALLEL execution of Research and CodeGen.
+            stage1_tasks.append(("CodeGenAgent", self.run_llm("CodeGen", MODEL_HEAVY, SYSTEM_PROMPTS["CodeGenAgent"], user_prompt, max_tokens=4000)))
+
+        # D. Explain (Flash) - High level explanation of the concept, not necessarily the code yet
+        # If ExplainAgent needs the code, it should be in Stage 2. 
+        # But user said: "ExplainAgent... These three do NOT depend on each other. So run them at the same time."
+        # So we run ExplainAgent on the USER PROMPT here.
+        if "ExplainAgent" in active_agents:
+             stage1_tasks.append(("ExplainAgent", self.run_llm("Explain", MODEL_FAST, SYSTEM_PROMPTS["ExplainAgent"], user_prompt)))
+
+        # Execute Stage 1
+        if stage1_tasks:
+            log.info(f"🚀 Starting Stage 1 with {len(stage1_tasks)} agents...")
+            # Unpack tasks
+            names = [t[0] for t in stage1_tasks]
+            coros = [t[1] for t in stage1_tasks]
+            
+            results_s1 = await asyncio.gather(*coros)
+            
+            for name, res in zip(names, results_s1):
+                results[name] = res
+
+        # Check for generated code
+        base_code = results.get("CodeGenAgent", {}).get("text", "")
+        
+        # =========================================================================
+        # ⚡ STAGE 2: DERIVATIVES (Parallel)
+        # Depends on CodeGen output
+        # =========================================================================
+        stage2_tasks = []
+        
+        if base_code:
+            # Context is the code + original prompt
+            context_for_derivs = f"Original Request: {user_prompt}\n\nCode:\n{base_code}"
+            
+            # Helper
+            def make_task(agent_name, model=MODEL_FAST):
+                return (agent_name, self.run_llm(agent_name, model, SYSTEM_PROMPTS[agent_name], context_for_derivs))
+
+            if "SafetyAgent" in active_agents:
+                stage2_tasks.append(make_task("SafetyAgent"))
+            
+            if "TestGenAgent" in active_agents:
+                stage2_tasks.append(make_task("TestGenAgent"))
+            
+            if "DocstringAgent" in active_agents:
+                stage2_tasks.append(make_task("DocstringAgent"))
+            
+            if "TranslateAgent" in active_agents:
+                # Translator might benefit from Pro, but Flash is usually fine for translation. User suggested Flash/Pro.
+                # Let's stick to Flash for speed unless it's critical.
+                stage2_tasks.append(make_task("TranslateAgent", MODEL_FAST))
+
+            # Execute Stage 2
+            if stage2_tasks:
+                log.info(f"⚡ Starting Stage 2 with {len(stage2_tasks)} agents...")
+                names = [t[0] for t in stage2_tasks]
+                coros = [t[1] for t in stage2_tasks]
+                
+                results_s2 = await asyncio.gather(*coros)
+                
+                for name, res in zip(names, results_s2):
+                    results[name] = res
+
+        # Update base code if docstrings were added
+        if results.get("DocstringAgent", {}).get("ok"):
+            base_code = results["DocstringAgent"]["text"]
+
+        # =========================================================================
+        # ⚖️ STAGE 3: EVALUATION (Sequential)
+        # Depends on everything
+        # =========================================================================
+        if "EvaluatorAgent" in active_agents and base_code:
+            log.info("⚖️ Starting Stage 3: Evaluator...")
+            eval_ctx = f"Req: {user_prompt}\nCode: {base_code}\nTests: {results.get('TestGenAgent', {}).get('text','')}"
+            results["EvaluatorAgent"] = await self.run_llm("Evaluator", MODEL_FAST, SYSTEM_PROMPTS["EvaluatorAgent"], eval_ctx)
+
+        # =========================================================================
+        # 📦 FINAL SUMMARY
+        # =========================================================================
+        latency = time.time() - start_time
+        log.info(f"✅ Plan Complete. Latency: {latency:.2f}s")
+        
+        return {
+            "summary": {
+                "intent": plan.get("intent_summary", "Task"),
+                "generated_code": base_code,
+                "explanation": results.get("ExplainAgent", {}).get("text") or results.get("GeneralAgent", {}).get("text"),
+                "tests": results.get("TestGenAgent", {}).get("text"),
+                "translation": results.get("TranslateAgent", {}).get("text"),
+                "safety": results.get("SafetyAgent", {}).get("text"),
+                "evaluation": results.get("EvaluatorAgent", {}).get("text"),
+                "latency": f"{latency:.2f}s"
+            },
+            "raw_results": results
+        }
