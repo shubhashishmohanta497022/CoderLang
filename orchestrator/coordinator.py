@@ -75,10 +75,168 @@ SYSTEM_PROMPTS = {
 }
 
 # ========== Orchestrator ==========
+
+class OrchestratorSession:
+    """
+    Represents a single resumable execution session.
+    State is serializable to JSON for LocalStorage persistence.
+    """
+    def __init__(self, orchestrator, prompt: str, state: Optional[Dict] = None):
+        self.orch = orchestrator
+        self.prompt = prompt
+        
+        if state:
+            self.state = state
+        else:
+            self.state = {
+                "stage": "INIT",  # INIT -> PLANNED -> STAGE1 -> STAGE2 -> STAGE3 -> COMPLETE
+                "plan": {},
+                "results": {},
+                "start_time": time.time(),
+                "logs": []
+            }
+
+    def log(self, message: str):
+        entry = f"{time.strftime('%H:%M:%S')} - {message}"
+        self.state["logs"].append(entry)
+        logging.info(f"[{self.state['stage']}] {message}")
+
+    def to_json(self) -> Dict:
+        return {
+            "prompt": self.prompt,
+            "state": self.state
+        }
+
+    async def run_next_step(self):
+        """Advances the workflow by one stage."""
+        stage = self.state["stage"]
+        results = self.state["results"]
+        
+        # --- STAGE 0: ROUTING ---
+        if stage == "INIT":
+            self.log("🧠 Routing Request...")
+            route_res = await self.orch.run_llm("Router", MODEL_FAST, SYSTEM_PROMPTS["TaskRouter"], self.prompt)
+            try:
+                plan = json.loads(route_res["text"])
+                # Normalize keys
+                if "agents_to_run" not in plan: plan["agents_to_run"] = ["GeneralAgent"]
+                if "parallelizable" not in plan: plan["parallelizable"] = False
+            except:
+                self.log("⚠️ Router failed JSON parse. Defaulting to GeneralChat.")
+                plan = {"intent_summary": "Fallback", "agents_to_run": ["GeneralAgent"], "parallelizable": False}
+            
+            self.state["plan"] = plan
+            self.state["stage"] = "PLANNED"
+            self.log(f"📋 Plan: {plan['agents_to_run']}")
+            return
+
+        active_agents = self.state["plan"].get("agents_to_run", [])
+
+        # --- STAGE 1: CREATION ---
+        if stage == "PLANNED":
+            self.log("🚀 Starting Stage 1 (Creation)...")
+            tasks = []
+            
+            if "ResearchAgent" in active_agents:
+                tasks.append(("ResearchAgent", self.orch.run_llm("Research", MODEL_FAST, SYSTEM_PROMPTS["ResearchAgent"], self.prompt)))
+            
+            if "GeneralAgent" in active_agents and "CodeGenAgent" not in active_agents:
+                tasks.append(("GeneralAgent", self.orch.run_llm("Chat", MODEL_FAST, SYSTEM_PROMPTS["GeneralAgent"], self.prompt)))
+                
+            if "CodeGenAgent" in active_agents:
+                tasks.append(("CodeGenAgent", self.orch.run_llm("CodeGen", MODEL_HEAVY, SYSTEM_PROMPTS["CodeGenAgent"], self.prompt, max_tokens=4000)))
+                
+            if "ExplainAgent" in active_agents:
+                tasks.append(("ExplainAgent", self.orch.run_llm("Explain", MODEL_FAST, SYSTEM_PROMPTS["ExplainAgent"], self.prompt)))
+
+            if tasks:
+                names = [t[0] for t in tasks]
+                coros = [t[1] for t in tasks]
+                results_s1 = await asyncio.gather(*coros)
+                for name, res in zip(names, results_s1):
+                    results[name] = res
+            
+            self.state["stage"] = "STAGE1"
+            self.log("✅ Stage 1 Complete.")
+            return
+
+        # --- STAGE 2: DERIVATIVES ---
+        if stage == "STAGE1":
+            base_code = results.get("CodeGenAgent", {}).get("text", "")
+            if not base_code:
+                self.log("⏩ No code generated, skipping Stage 2.")
+                self.state["stage"] = "STAGE2"
+                return
+
+            self.log("⚡ Starting Stage 2 (Derivatives)...")
+            context_for_derivs = f"Original Request: {self.prompt}\n\nCode:\n{base_code}"
+            tasks = []
+
+            def make_task(agent_name, model=MODEL_FAST):
+                return (agent_name, self.orch.run_llm(agent_name, model, SYSTEM_PROMPTS[agent_name], context_for_derivs))
+
+            if "SafetyAgent" in active_agents: tasks.append(make_task("SafetyAgent"))
+            if "TestGenAgent" in active_agents: tasks.append(make_task("TestGenAgent"))
+            if "DocstringAgent" in active_agents: tasks.append(make_task("DocstringAgent"))
+            if "TranslateAgent" in active_agents: tasks.append(make_task("TranslateAgent"))
+
+            if tasks:
+                names = [t[0] for t in tasks]
+                coros = [t[1] for t in tasks]
+                results_s2 = await asyncio.gather(*coros)
+                for name, res in zip(names, results_s2):
+                    results[name] = res
+
+            # Update base code if docstrings were added
+            if results.get("DocstringAgent", {}).get("ok"):
+                # We store the docstring version as the 'final' code in a separate key or just overwrite
+                # For simplicity, let's overwrite the display code in summary later, but keep raw result here
+                pass
+
+            self.state["stage"] = "STAGE2"
+            self.log("✅ Stage 2 Complete.")
+            return
+
+        # --- STAGE 3: EVALUATION ---
+        if stage == "STAGE2":
+            base_code = results.get("DocstringAgent", {}).get("text") or results.get("CodeGenAgent", {}).get("text", "")
+            
+            if "EvaluatorAgent" in active_agents and base_code:
+                self.log("⚖️ Starting Stage 3 (Evaluation)...")
+                eval_ctx = f"Req: {self.prompt}\nCode: {base_code}\nTests: {results.get('TestGenAgent', {}).get('text','')}"
+                results["EvaluatorAgent"] = await self.orch.run_llm("Evaluator", MODEL_FAST, SYSTEM_PROMPTS["EvaluatorAgent"], eval_ctx)
+            
+            self.state["stage"] = "COMPLETE"
+            self.log("✅ Workflow Complete.")
+            return
+
+    def get_summary(self) -> Dict:
+        """Generates the summary object expected by the UI."""
+        results = self.state["results"]
+        plan = self.state["plan"]
+        
+        # Determine final code (Docstring > CodeGen)
+        base_code = results.get("DocstringAgent", {}).get("text") or results.get("CodeGenAgent", {}).get("text", "")
+        
+        latency = time.time() - self.state["start_time"]
+        
+        return {
+            "intent": plan.get("intent_summary", "Task"),
+            "generated_code": base_code,
+            "explanation": results.get("ExplainAgent", {}).get("text") or results.get("GeneralAgent", {}).get("text"),
+            "tests": results.get("TestGenAgent", {}).get("text"),
+            "translation": results.get("TranslateAgent", {}).get("text"),
+            "safety": results.get("SafetyAgent", {}).get("text"),
+            "evaluation": results.get("EvaluatorAgent", {}).get("text"),
+            "latency": f"{latency:.2f}s",
+            "stage": self.state["stage"],
+            "logs": self.state["logs"]
+        }
+
+
 class Orchestrator:
     def __init__(self, max_workers: int = 10):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.research_agent = None # Lazy load
 
     async def run_llm(self, task_name: str, model: str, system_prompt: str, input_context: str, max_tokens: int = 2000) -> Dict:
         """Universal Async LLM Caller"""
@@ -86,14 +244,11 @@ class Orchestrator:
         genai.configure(api_key=api_key)
 
         def _blocking_call():
-            # Fallback to 1.5 Pro if 2.0 Pro Exp is not available or fails (handled by try/except below roughly)
-            # But for now we trust the config.
             m = genai.GenerativeModel(model_name=model, safety_settings=SAFETY_SETTINGS)
             full_prompt = f"{system_prompt}\n\n[Context]:\n{input_context}"
             try:
                 res = m.generate_content(full_prompt)
                 text = res.text
-                # Basic markdown stripper
                 if "```" in text: 
                     text = text.replace("```json", "").replace("```python", "").replace("```", "").strip()
                 return {"text": text, "ok": True}
@@ -103,137 +258,16 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, _blocking_call)
 
+    def create_session(self, prompt: str, state: Optional[Dict] = None) -> OrchestratorSession:
+        return OrchestratorSession(self, prompt, state)
+
+    # Legacy wrapper for backward compatibility if needed
     async def run_plan(self, user_prompt: str) -> Dict[str, Any]:
-        results = {}
-        start_time = time.time()
-        log.info(f"▶️ Request: {user_prompt[:50]}...")
-
-        # =========================================================================
-        # 🧠 PHASE 0: ROUTING (The Brain)
-        # =========================================================================
-        route_res = await self.run_llm("Router", MODEL_FAST, SYSTEM_PROMPTS["TaskRouter"], user_prompt)
-        try:
-            plan = json.loads(route_res["text"])
-            active_agents = plan.get("agents_to_run", ["GeneralAgent"])
-            parallelizable = plan.get("parallelizable", False)
-        except:
-            log.warning("⚠️ Router failed JSON parse. Defaulting to GeneralChat.")
-            active_agents = ["GeneralAgent"]
-            plan = {"intent_summary": "Fallback"}
-
-        log.info(f"📋 Plan: {active_agents} | Parallel: {parallelizable}")
-
-        # =========================================================================
-        # 🚀 STAGE 1: CREATION (Parallel)
-        # Research, CodeGen, Explain (Conceptual) - Independent of each other
-        # =========================================================================
-        stage1_tasks = []
-        
-        # A. Research (Flash)
-        if "ResearchAgent" in active_agents:
-            stage1_tasks.append(("ResearchAgent", self.run_llm("Research", MODEL_FAST, SYSTEM_PROMPTS["ResearchAgent"], user_prompt)))
-
-        # B. General Chat (Flash)
-        if "GeneralAgent" in active_agents and "CodeGenAgent" not in active_agents:
-            stage1_tasks.append(("GeneralAgent", self.run_llm("Chat", MODEL_FAST, SYSTEM_PROMPTS["GeneralAgent"], user_prompt)))
-
-        # C. Coding (Pro) - The Heavy Lifter
-        if "CodeGenAgent" in active_agents:
-            # CodeGen gets the raw user prompt. 
-            # Note: If we wanted to feed Research into CodeGen, we'd have to make them sequential.
-            # The user explicitly asked for PARALLEL execution of Research and CodeGen.
-            stage1_tasks.append(("CodeGenAgent", self.run_llm("CodeGen", MODEL_HEAVY, SYSTEM_PROMPTS["CodeGenAgent"], user_prompt, max_tokens=4000)))
-
-        # D. Explain (Flash) - High level explanation of the concept, not necessarily the code yet
-        # If ExplainAgent needs the code, it should be in Stage 2. 
-        # But user said: "ExplainAgent... These three do NOT depend on each other. So run them at the same time."
-        # So we run ExplainAgent on the USER PROMPT here.
-        if "ExplainAgent" in active_agents:
-             stage1_tasks.append(("ExplainAgent", self.run_llm("Explain", MODEL_FAST, SYSTEM_PROMPTS["ExplainAgent"], user_prompt)))
-
-        # Execute Stage 1
-        if stage1_tasks:
-            log.info(f"🚀 Starting Stage 1 with {len(stage1_tasks)} agents...")
-            # Unpack tasks
-            names = [t[0] for t in stage1_tasks]
-            coros = [t[1] for t in stage1_tasks]
-            
-            results_s1 = await asyncio.gather(*coros)
-            
-            for name, res in zip(names, results_s1):
-                results[name] = res
-
-        # Check for generated code
-        base_code = results.get("CodeGenAgent", {}).get("text", "")
-        
-        # =========================================================================
-        # ⚡ STAGE 2: DERIVATIVES (Parallel)
-        # Depends on CodeGen output
-        # =========================================================================
-        stage2_tasks = []
-        
-        if base_code:
-            # Context is the code + original prompt
-            context_for_derivs = f"Original Request: {user_prompt}\n\nCode:\n{base_code}"
-            
-            # Helper
-            def make_task(agent_name, model=MODEL_FAST):
-                return (agent_name, self.run_llm(agent_name, model, SYSTEM_PROMPTS[agent_name], context_for_derivs))
-
-            if "SafetyAgent" in active_agents:
-                stage2_tasks.append(make_task("SafetyAgent"))
-            
-            if "TestGenAgent" in active_agents:
-                stage2_tasks.append(make_task("TestGenAgent"))
-            
-            if "DocstringAgent" in active_agents:
-                stage2_tasks.append(make_task("DocstringAgent"))
-            
-            if "TranslateAgent" in active_agents:
-                # Translator might benefit from Pro, but Flash is usually fine for translation. User suggested Flash/Pro.
-                # Let's stick to Flash for speed unless it's critical.
-                stage2_tasks.append(make_task("TranslateAgent", MODEL_FAST))
-
-            # Execute Stage 2
-            if stage2_tasks:
-                log.info(f"⚡ Starting Stage 2 with {len(stage2_tasks)} agents...")
-                names = [t[0] for t in stage2_tasks]
-                coros = [t[1] for t in stage2_tasks]
-                
-                results_s2 = await asyncio.gather(*coros)
-                
-                for name, res in zip(names, results_s2):
-                    results[name] = res
-
-        # Update base code if docstrings were added
-        if results.get("DocstringAgent", {}).get("ok"):
-            base_code = results["DocstringAgent"]["text"]
-
-        # =========================================================================
-        # ⚖️ STAGE 3: EVALUATION (Sequential)
-        # Depends on everything
-        # =========================================================================
-        if "EvaluatorAgent" in active_agents and base_code:
-            log.info("⚖️ Starting Stage 3: Evaluator...")
-            eval_ctx = f"Req: {user_prompt}\nCode: {base_code}\nTests: {results.get('TestGenAgent', {}).get('text','')}"
-            results["EvaluatorAgent"] = await self.run_llm("Evaluator", MODEL_FAST, SYSTEM_PROMPTS["EvaluatorAgent"], eval_ctx)
-
-        # =========================================================================
-        # 📦 FINAL SUMMARY
-        # =========================================================================
-        latency = time.time() - start_time
-        log.info(f"✅ Plan Complete. Latency: {latency:.2f}s")
+        session = self.create_session(user_prompt)
+        while session.state["stage"] != "COMPLETE":
+            await session.run_next_step()
         
         return {
-            "summary": {
-                "intent": plan.get("intent_summary", "Task"),
-                "generated_code": base_code,
-                "explanation": results.get("ExplainAgent", {}).get("text") or results.get("GeneralAgent", {}).get("text"),
-                "tests": results.get("TestGenAgent", {}).get("text"),
-                "translation": results.get("TranslateAgent", {}).get("text"),
-                "safety": results.get("SafetyAgent", {}).get("text"),
-                "evaluation": results.get("EvaluatorAgent", {}).get("text"),
-                "latency": f"{latency:.2f}s"
-            },
-            "raw_results": results
+            "summary": session.get_summary(),
+            "raw_results": session.state["results"]
         }

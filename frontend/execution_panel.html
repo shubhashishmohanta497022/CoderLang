@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoderLang Execution Engine</title>
+
+    <!-- XTerm.js CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+
+    <!-- Pyodide -->
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
+
+    <!-- CheerpJ (Java) -->
+    <script src="https://cjrtnc.leaningtech.com/3.0/cj3loader.js"></script>
+
+    <!-- XTerm.js -->
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0e1117;
+            color: #ffffff;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        #controls {
+            padding: 10px;
+            background-color: #262730;
+            border-bottom: 1px solid #444;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            background-color: #00d26a;
+            color: black;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background-color: #00b359;
+        }
+
+        button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+
+        #tabs {
+            display: flex;
+            background-color: #1e1e1e;
+        }
+
+        .tab {
+            padding: 8px 16px;
+            cursor: pointer;
+            background-color: #1e1e1e;
+            border-right: 1px solid #333;
+            color: #888;
+        }
+
+        .tab.active {
+            background-color: #0e1117;
+            color: white;
+            border-top: 2px solid #00d26a;
+        }
+
+        #content-area {
+            position: relative;
+            height: 400px;
+            /* Fixed height for iframe context */
+            width: 100%;
+        }
+
+        .view {
+            display: none;
+            height: 100%;
+            width: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            background-color: #ffffff;
+            /* White bg for plots */
+            color: black;
+        }
+
+        #dom-container {
+            background-color: white;
+            color: black;
+            padding: 10px;
+            overflow: auto;
+        }
+
+        /* Spinner */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border-left-color: #00d26a;
+            animation: spin 1s linear infinite;
+            display: none;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="controls">
+        <button id="run-btn" onclick="runCode()">▶ Run Code</button>
+        <div class="spinner" id="loader"></div>
+        <span id="status-text" style="font-size: 12px; color: #aaa;">Ready</span>
+    </div>
+
+    <div id="tabs">
+        <div class="tab active" onclick="switchTab('terminal')">Terminal</div>
+        <div class="tab" onclick="switchTab('canvas')">Canvas / UI</div>
+        <div class="tab" onclick="switchTab('dom')">DOM Output</div>
+    </div>
+
+    <div id="content-area">
+        <div id="terminal-container" class="view active"></div>
+        <div id="canvas-container" class="view">
+            <canvas id="main-canvas"></canvas>
+        </div>
+        <div id="dom-container" class="view"></div>
+    </div>
+
+    <script>
+        // --- STATE ---
+        let pyodide = null;
+        let term = null;
+        let fitAddon = null;
+
+        // --- INJECTED VARIABLES ---
+        // These will be replaced by Python before rendering
+        const CODE = `__CODE_GOES_HERE__`;
+        const LANGUAGE = `__LANG_GOES_HERE__`;
+
+        // --- SETUP ---
+        window.onload = async function () {
+            initTerminal();
+
+            if (LANGUAGE === 'python') {
+                document.getElementById('status-text').innerText = "Loading Pyodide...";
+                document.getElementById('loader').style.display = 'block';
+                document.getElementById('run-btn').disabled = true;
+
+                try {
+                    pyodide = await loadPyodide();
+                    await pyodide.loadPackage(["micropip", "matplotlib", "numpy", "pandas"]);
+
+                    document.getElementById('status-text').innerText = "Pyodide Ready";
+                    document.getElementById('run-btn').disabled = false;
+                } catch (e) {
+                    term.writeln(`\x1b[31mFailed to load Pyodide: ${e}\x1b[0m`);
+                } finally {
+                    document.getElementById('loader').style.display = 'none';
+                }
+            } else if (LANGUAGE === 'java') {
+                document.getElementById('status-text').innerText = "Ready (CheerpJ)";
+            } else {
+                document.getElementById('status-text').innerText = "Ready (JS/Native)";
+            }
+        };
+
+        function initTerminal() {
+            term = new Terminal({
+                cursorBlink: true,
+                theme: { background: '#000000' },
+                rows: 20
+            });
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open(document.getElementById('terminal-container'));
+            fitAddon.fit();
+
+            term.writeln('\x1b[32mWelcome to CoderLang Execution Engine\x1b[0m');
+            term.writeln(`Detected Language: ${LANGUAGE}`);
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+
+            document.querySelector(`.tab[onclick="switchTab('${tabName}')"]`).classList.add('active');
+
+            if (tabName === 'terminal') {
+                document.getElementById('terminal-container').classList.add('active');
+                fitAddon.fit();
+            } else if (tabName === 'canvas') {
+                document.getElementById('canvas-container').classList.add('active');
+            } else {
+                document.getElementById('dom-container').classList.add('active');
+            }
+        }
+
+        // --- RUNNERS ---
+        async function runCode() {
+            term.clear();
+            document.getElementById('loader').style.display = 'block';
+
+            try {
+                if (LANGUAGE === 'python') {
+                    await runPython();
+                } else if (LANGUAGE === 'javascript') {
+                    runJS();
+                } else if (LANGUAGE === 'java') {
+                    await runJava();
+                } else {
+                    term.writeln(`\x1b[33mExecution for ${LANGUAGE} is not yet implemented.\x1b[0m`);
+                }
+            } catch (e) {
+                term.writeln(`\r\n\x1b[31mError: ${e.message || e}\x1b[0m`);
+            } finally {
+                document.getElementById('loader').style.display = 'none';
+            }
+        }
+
+        async function runJava() {
+            term.writeln("Initializing CheerpJ...");
+            try {
+                await cheerpjInit();
+                term.writeln("CheerpJ Ready.");
+                term.writeln("⚠️ Java Source execution requires client-side compilation.");
+                term.writeln("Feature coming soon: On-the-fly javac compilation.");
+
+                // Example of what we would do if we had a class file:
+                // await cheerpjRunMain("Main", "/app/classpath");
+
+            } catch (e) {
+                term.writeln(`\x1b[31mCheerpJ Error: ${e}\x1b[0m`);
+            }
+        }
+
+        async function runPython() {
+            if (!pyodide) {
+                term.writeln("Pyodide not loaded yet.");
+                return;
+            }
+
+            // Redirect stdout
+            pyodide.setStdout({ batched: (msg) => term.writeln(msg) });
+            pyodide.setStderr({ batched: (msg) => term.writeln(`\x1b[31m${msg}\x1b[0m`) });
+
+            // Setup Canvas for Matplotlib
+            const canvasDiv = document.getElementById('canvas-container');
+            canvasDiv.innerHTML = '<div id="plot-target"></div>';
+            document.pyodideMplTarget = document.getElementById('plot-target');
+
+            // Wrap code to target canvas if using matplotlib
+            const wrappedCode = `
+import sys
+import os
+from js import document
+
+# Mocking standard plot show to target our div if needed, 
+# but Pyodide's matplotlib backend usually handles 'figure' element creation.
+# We just ensure the environment is clean.
+
+${CODE}
+            `;
+
+            await pyodide.runPythonAsync(wrappedCode);
+            term.writeln("\r\n\x1b[32m>>> Execution Complete\x1b[0m");
+
+            // Check if we should switch to canvas tab (heuristic)
+            if (CODE.includes('matplotlib') || CODE.includes('plt.show')) {
+                switchTab('canvas');
+            }
+        }
+
+        function runJS() {
+            // For JS, we use a safe-ish eval or Function
+            // We redirect console.log
+            const originalLog = console.log;
+            const originalError = console.error;
+
+            console.log = (...args) => term.writeln(args.join(' '));
+            console.error = (...args) => term.writeln(`\x1b[31m${args.join(' ')}\x1b[0m`);
+
+            const domContainer = document.getElementById('dom-container');
+            domContainer.innerHTML = ''; // Clear previous
+
+            try {
+                const sandboxCode = `
+                    const print = (...args) => console.log(...args);
+                    const container = document.getElementById('dom-container');
+                    const canvas = document.getElementById('main-canvas'); // Expose the main canvas
+                    
+                    ${CODE}
+                `;
+
+                new Function(sandboxCode)();
+
+                term.writeln("\r\n\x1b[32m>>> JS Execution Triggered\x1b[0m");
+
+                if (CODE.includes('document.') || CODE.includes('canvas')) {
+                    switchTab('canvas'); // or dom
+                }
+
+            } catch (e) {
+                console.error(e);
+            } finally {
+                // Restore console (optional, but good practice if we were sharing window)
+                // console.log = originalLog;
+            }
+        }
+
+    </script>
+</body>
+
+</html>
