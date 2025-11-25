@@ -157,69 +157,114 @@ with st.sidebar:
             label = f"🔹 {label}"
         if st.button(label, key=session["id"], use_container_width=True):
             st.session_state.current_chat_id = session["id"]
-            # Clear workflow session when switching chats (unless we want to persist per chat? For now, clear)
+            # Clear workflow session when switching chats
             if "workflow_session" in st.session_state:
                 del st.session_state.workflow_session
             st.rerun()
 
     st.divider()
-    if st.button("Clear Session Memory"):
-        st.session_state.memory._init_file(st.session_state.memory.short_term_path)
-        st.toast("Short-term memory cleared!", icon="🧹")
     
-    st.subheader("Active Configuration")
-    st.info("""
-    **Router:** Gemini 2.5 Flash
-    **Coding:** Gemini 3 Pro Preview
-    **Analysis:** Gemini 2.5 Flash
-    **Pipeline:** Async DAG
-    """)
+    # --- REPO IMPORT (Paperclip Functionality) ---
+    with st.expander("📎 Import Repository"):
+        repo_url = st.text_input("Git Repo URL", key="repo_url_input")
+        if st.button("Fetch Repo", key="fetch_repo_btn"):
+            with st.spinner("Fetching repository..."):
+                from utils.repo_loader import RepoLoader
+                loader = RepoLoader()
+                path, err = loader.fetch_repo(repo_url)
+                if path:
+                    st.session_state.repo_path = path
+                    st.session_state.repo_files = loader.get_file_tree(path)
+                    st.success("Repo fetched!")
+                else:
+                    st.error(f"Failed: {err}")
+        
+        if "repo_files" in st.session_state:
+            selected_files = st.multiselect("Select Files", st.session_state.repo_files)
+            analysis_goal = st.selectbox("Goal", [
+                "Explain Codebase",
+                "Refactor Code",
+                "Find Bugs",
+                "Add Comments",
+                "Convert to Python",
+                "Extend Functionality"
+            ])
+            custom_goal = st.text_input("Custom Goal")
+            
+            if st.button("Analyze", type="primary"):
+                if not selected_files:
+                    st.warning("Select files first.")
+                else:
+                    from utils.repo_loader import RepoLoader
+                    loader = RepoLoader()
+                    context = ""
+                    for f in selected_files:
+                        content = loader.read_file(st.session_state.repo_path, f)
+                        context += f"\n--- FILE: {f} ---\n{content}\n"
+                    
+                    final_goal = custom_goal if custom_goal else analysis_goal
+                    full_prompt = f"Analyze the following repository files.\nGOAL: {final_goal}\n\nCONTEXT:\n{context}"
+                    process_prompt(full_prompt)
+
+    # --- SETTINGS ---
+    with st.expander("⚙️ Settings"):
+        st.subheader("Data Management")
+        # Export
+        if st.button("Export Memory Dump"):
+            dump = st.session_state.memory.get_full_memory_dump()
+            st.download_button(
+                label="Download JSON",
+                data=json.dumps(dump, indent=2),
+                file_name=f"coderlang_memory_{int(time.time())}.json",
+                mime="application/json"
+            )
+        
+        # Import
+        uploaded_file = st.file_uploader("Import Chat", type=["json"])
+        if uploaded_file is not None:
+            try:
+                content = json.load(uploaded_file)
+                success, msg = st.session_state.memory.import_chat_session(content)
+                if success:
+                    st.success(msg)
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(msg)
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+        
+        st.divider()
+        if st.button("Clear Session Memory"):
+            st.session_state.memory._init_file(st.session_state.memory.short_term_path)
+            st.toast("Memory cleared!", icon="🧹")
+        
+        st.info("**Configuration:**\n- Router: Gemini 2.5 Flash\n- Coding: Gemini 3 Pro Preview")
 
 # --- CHAT INTERFACE ---
-
-# Load Execution Panel Template
-try:
-    with open("frontend/execution_panel.html", "r", encoding="utf-8") as f:
-        EXECUTION_PANEL_TEMPLATE = f.read()
-except FileNotFoundError:
-    EXECUTION_PANEL_TEMPLATE = "<div>Error: frontend/execution_panel.html not found</div>"
-
-def render_execution_panel(code, language):
-    """Injects code into the HTML template and renders it."""
-    # Escape code for JS template literal
-    # 1. Escape backslashes
-    # 2. Escape backticks
-    # 3. Escape ${ for template literals
-    safe_code = code.replace("\\", "\\\\").replace("`", "\\`").replace("${", r"\${")
-    
-    html_content = EXECUTION_PANEL_TEMPLATE.replace("__CODE_GOES_HERE__", safe_code)
-    html_content = html_content.replace("__LANG_GOES_HERE__", language)
-    
-    st.components.v1.html(html_content, height=450, scrolling=False)
 
 def render_message_content(summary, raw, key_suffix=""):
     if summary.get("generated_code"):
         task_type = summary.get("intent", "General Task")
-        st.markdown(f"**Task:** {task_type}")
+        
+        # Header with Download Response Button
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.markdown(f"**Task:** {task_type}")
+        with c2:
+            st.download_button(
+                "📥 JSON", 
+                data=json.dumps(summary, indent=2), 
+                file_name=f"response_{key_suffix}.json", 
+                key=f"dl_res_{key_suffix}"
+            )
+
         if summary.get("explanation"):
             st.markdown(summary["explanation"])
         
-        # Determine Language
-        language = "python"
-        code_to_run = summary["generated_code"]
-        
-        # Check for JS signatures
-        if "console.log" in code_to_run or "document.getElementById" in code_to_run or "function " in code_to_run:
-             if "def " not in code_to_run:
-                 language = "javascript"
-
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["▶️ Run Code", "💻 Source", "📊 Evaluation", "🧪 Tests & Docs", "📜 System Logs"])
+        tab1, tab2, tab3, tab4 = st.tabs(["💻 Source", "📊 Evaluation", "🧪 Tests & Docs", "📜 System Logs"])
         
         with tab1:
-            st.caption(f"Execution Engine ({language})")
-            render_execution_panel(code_to_run, language)
-
-        with tab2:
             st.subheader("Source Code")
             st.code(summary["generated_code"], language="python", line_numbers=True)
             st.download_button("Download .py", summary["generated_code"], "solution.py", key=f"dl_btn_{key_suffix}")
@@ -230,7 +275,7 @@ def render_message_content(summary, raw, key_suffix=""):
             if summary.get("explanation"):
                 with st.expander("💡 Logic Explanation"):
                     st.markdown(summary["explanation"])
-        with tab3:
+        with tab2:
             eval_text = summary.get("evaluation", "No evaluation.")
             score = "N/A"
             if "Score:" in eval_text:
@@ -242,13 +287,13 @@ def render_message_content(summary, raw, key_suffix=""):
             st.info(eval_text)
             if summary.get("safety"):
                 st.warning(f"🔒 Safety Scan: {summary['safety']}")
-        with tab4:
+        with tab3:
             if summary.get("tests"):
                 st.subheader("Unit Tests")
                 st.code(summary["tests"], language="python")
             else:
                 st.text("No tests generated.")
-        with tab5:
+        with tab4:
             st.json(raw)
     else:
         if summary.get("explanation"):
@@ -269,6 +314,22 @@ def process_prompt(prompt, is_refinement=False):
     st.rerun()
 
 # Display History
+# Header Actions
+c_head, c_act = st.columns([10, 2])
+with c_head:
+    pass # Title already rendered above
+with c_act:
+    # Download Current Chat
+    current_chat_json = st.session_state.memory.export_chat_session(st.session_state.current_chat_id)
+    if current_chat_json:
+        st.download_button(
+            "📥 Chat",
+            data=current_chat_json,
+            file_name=f"chat_{st.session_state.current_chat_id}.json",
+            mime="application/json",
+            key="dl_chat_top"
+        )
+
 for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         if message.get("metadata") and "summary" in message["metadata"]:

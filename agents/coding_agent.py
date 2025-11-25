@@ -48,6 +48,14 @@ class CodingAgent:
         
         Provide *only* the raw, runnable Python code.
         Do NOT include any explanations, comments, or Markdown wrappers (e.g., '```python').
+
+        IMPORTANT EXECUTION RULES:
+        1. You MUST include a `if __name__ == "__main__":` block at the end.
+        2. Inside that block, you MUST call the main function or demonstrate the code's functionality.
+        3. Ensure the code prints visible output to the console so the user sees it working.
+        4. If the user asks for a visual game (like Snake), DO NOT use 'pygame' or 'tkinter'.
+           Instead, write a text-based version that runs in the console using print statements, 
+           OR use standard Python libraries that are compatible with Pyodide/Jupyter environments (like matplotlib for plots).
         
         User Request: {full_user_request}
         """

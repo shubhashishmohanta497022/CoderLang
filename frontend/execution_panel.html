@@ -6,18 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CoderLang Execution Engine</title>
 
-    <!-- XTerm.js CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
-
     <!-- Pyodide -->
     <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
 
     <!-- CheerpJ (Java) -->
     <script src="https://cjrtnc.leaningtech.com/3.0/cj3loader.js"></script>
-
-    <!-- XTerm.js -->
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 
     <style>
         body {
@@ -92,7 +85,30 @@
             top: 0;
             left: 0;
             background-color: #ffffff;
-            /* White bg for plots */
+            color: black;
+        }
+
+        .view.active {
+            display: block;
+        }
+
+        #log-container {
+            background-color: #000;
+            color: #0f0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            padding: 10px;
+            height: 100%;
+            box-sizing: border-box;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            font-size: 14px;
+        }
+
+        #canvas-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #ffffff;
             color: black;
         }
 
@@ -135,13 +151,13 @@
     </div>
 
     <div id="tabs">
-        <div class="tab active" onclick="switchTab('terminal')">Terminal</div>
+        <div class="tab active" onclick="switchTab('logs')">Logs</div>
         <div class="tab" onclick="switchTab('canvas')">Canvas / UI</div>
         <div class="tab" onclick="switchTab('dom')">DOM Output</div>
     </div>
 
     <div id="content-area">
-        <div id="terminal-container" class="view active"></div>
+        <div id="log-container" class="view active"></div>
         <div id="canvas-container" class="view">
             <canvas id="main-canvas"></canvas>
         </div>
@@ -151,17 +167,15 @@
     <script>
         // --- STATE ---
         let pyodide = null;
-        let term = null;
-        let fitAddon = null;
 
         // --- INJECTED VARIABLES ---
-        // These will be replaced by Python before rendering
         const CODE = `__CODE_GOES_HERE__`;
         const LANGUAGE = `__LANG_GOES_HERE__`;
 
         // --- SETUP ---
         window.onload = async function () {
-            initTerminal();
+            log(`Welcome to CoderLang Execution Engine`);
+            log(`Detected Language: ${LANGUAGE}`);
 
             if (LANGUAGE === 'python') {
                 document.getElementById('status-text').innerText = "Loading Pyodide...";
@@ -175,7 +189,7 @@
                     document.getElementById('status-text').innerText = "Pyodide Ready";
                     document.getElementById('run-btn').disabled = false;
                 } catch (e) {
-                    term.writeln(`\x1b[31mFailed to load Pyodide: ${e}\x1b[0m`);
+                    log(`Failed to load Pyodide: ${e}`, 'error');
                 } finally {
                     document.getElementById('loader').style.display = 'none';
                 }
@@ -186,19 +200,21 @@
             }
         };
 
-        function initTerminal() {
-            term = new Terminal({
-                cursorBlink: true,
-                theme: { background: '#000000' },
-                rows: 20
-            });
-            fitAddon = new FitAddon.FitAddon();
-            term.loadAddon(fitAddon);
-            term.open(document.getElementById('terminal-container'));
-            fitAddon.fit();
+        function log(message, type = 'info') {
+            const container = document.getElementById('log-container');
+            const entry = document.createElement('div');
+            entry.textContent = message;
+            if (type === 'error') {
+                entry.style.color = '#ff5555';
+            } else if (type === 'warn') {
+                entry.style.color = '#ffb86c';
+            }
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
 
-            term.writeln('\x1b[32mWelcome to CoderLang Execution Engine\x1b[0m');
-            term.writeln(`Detected Language: ${LANGUAGE}`);
+        function clearLogs() {
+            document.getElementById('log-container').innerHTML = '';
         }
 
         function switchTab(tabName) {
@@ -207,9 +223,8 @@
 
             document.querySelector(`.tab[onclick="switchTab('${tabName}')"]`).classList.add('active');
 
-            if (tabName === 'terminal') {
-                document.getElementById('terminal-container').classList.add('active');
-                fitAddon.fit();
+            if (tabName === 'logs') {
+                document.getElementById('log-container').classList.add('active');
             } else if (tabName === 'canvas') {
                 document.getElementById('canvas-container').classList.add('active');
             } else {
@@ -219,7 +234,7 @@
 
         // --- RUNNERS ---
         async function runCode() {
-            term.clear();
+            clearLogs();
             document.getElementById('loader').style.display = 'block';
 
             try {
@@ -230,40 +245,39 @@
                 } else if (LANGUAGE === 'java') {
                     await runJava();
                 } else {
-                    term.writeln(`\x1b[33mExecution for ${LANGUAGE} is not yet implemented.\x1b[0m`);
+                    log(`Execution for ${LANGUAGE} is not yet implemented.`, 'warn');
                 }
             } catch (e) {
-                term.writeln(`\r\n\x1b[31mError: ${e.message || e}\x1b[0m`);
+                log(`Error: ${e.message || e}`, 'error');
             } finally {
                 document.getElementById('loader').style.display = 'none';
             }
         }
 
         async function runJava() {
-            term.writeln("Initializing CheerpJ...");
+            log(">>> Executing Java code...");
+            log("Initializing CheerpJ...");
             try {
                 await cheerpjInit();
-                term.writeln("CheerpJ Ready.");
-                term.writeln("⚠️ Java Source execution requires client-side compilation.");
-                term.writeln("Feature coming soon: On-the-fly javac compilation.");
-
-                // Example of what we would do if we had a class file:
-                // await cheerpjRunMain("Main", "/app/classpath");
+                log("CheerpJ Ready.");
+                log("⚠️ Java Source execution requires client-side compilation.", 'warn');
+                log("Feature coming soon: On-the-fly javac compilation.");
 
             } catch (e) {
-                term.writeln(`\x1b[31mCheerpJ Error: ${e}\x1b[0m`);
+                log(`CheerpJ Error: ${e}`, 'error');
             }
         }
 
         async function runPython() {
+            log(">>> Executing Python code...");
             if (!pyodide) {
-                term.writeln("Pyodide not loaded yet.");
+                log("Pyodide not loaded yet.", 'error');
                 return;
             }
 
             // Redirect stdout
-            pyodide.setStdout({ batched: (msg) => term.writeln(msg) });
-            pyodide.setStderr({ batched: (msg) => term.writeln(`\x1b[31m${msg}\x1b[0m`) });
+            pyodide.setStdout({ batched: (msg) => log(msg) });
+            pyodide.setStderr({ batched: (msg) => log(msg, 'error') });
 
             // Setup Canvas for Matplotlib
             const canvasDiv = document.getElementById('canvas-container');
@@ -284,7 +298,7 @@ ${CODE}
             `;
 
             await pyodide.runPythonAsync(wrappedCode);
-            term.writeln("\r\n\x1b[32m>>> Execution Complete\x1b[0m");
+            log(">>> Execution Complete");
 
             // Check if we should switch to canvas tab (heuristic)
             if (CODE.includes('matplotlib') || CODE.includes('plt.show')) {
@@ -293,13 +307,14 @@ ${CODE}
         }
 
         function runJS() {
+            log(">>> Executing JavaScript code...");
             // For JS, we use a safe-ish eval or Function
             // We redirect console.log
             const originalLog = console.log;
             const originalError = console.error;
 
-            console.log = (...args) => term.writeln(args.join(' '));
-            console.error = (...args) => term.writeln(`\x1b[31m${args.join(' ')}\x1b[0m`);
+            console.log = (...args) => log(args.join(' '));
+            console.error = (...args) => log(args.join(' '), 'error');
 
             const domContainer = document.getElementById('dom-container');
             domContainer.innerHTML = ''; // Clear previous
@@ -315,7 +330,7 @@ ${CODE}
 
                 new Function(sandboxCode)();
 
-                term.writeln("\r\n\x1b[32m>>> JS Execution Triggered\x1b[0m");
+                log(">>> JS Execution Triggered");
 
                 if (CODE.includes('document.') || CODE.includes('canvas')) {
                     switchTab('canvas'); // or dom

@@ -140,3 +140,51 @@ class MemoryStore:
             os.remove(filepath)
             return True
         return False
+
+    # --- Import / Export ---
+
+    def export_chat_session(self, session_id):
+        """Returns the JSON string of a chat session."""
+        filepath = os.path.join(self.chats_dir, f"{session_id}.json")
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                return f.read()
+        return None
+
+    def import_chat_session(self, json_data):
+        """Imports a chat session from a JSON string or dict."""
+        try:
+            if isinstance(json_data, str):
+                data = json.loads(json_data)
+            else:
+                data = json_data
+            
+            # Basic validation
+            if "id" not in data or "messages" not in data:
+                return False, "Invalid chat format: Missing 'id' or 'messages'"
+            
+            # Ensure ID doesn't conflict (or overwrite if intended? Let's overwrite for restore)
+            # If we wanted to avoid overwrite, we'd generate a new ID.
+            # For now, let's keep the ID to allow exact restoration.
+            
+            filepath = os.path.join(self.chats_dir, f"{data['id']}.json")
+            self._save(filepath, data)
+            return True, f"Chat '{data.get('title', 'Untitled')}' imported successfully."
+        except Exception as e:
+            return False, str(e)
+
+    def get_full_memory_dump(self):
+        """Returns a dictionary containing all memory (Short, Long, Chats)."""
+        dump = {
+            "short_term": self._load(self.short_term_path),
+            "long_term": self._load(self.long_term_path),
+            "chats": []
+        }
+        
+        if os.path.exists(self.chats_dir):
+            for filename in os.listdir(self.chats_dir):
+                if filename.endswith(".json"):
+                    filepath = os.path.join(self.chats_dir, filename)
+                    dump["chats"].append(self._load(filepath))
+        
+        return dump
