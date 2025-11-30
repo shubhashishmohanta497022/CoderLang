@@ -1,6 +1,4 @@
 import streamlit as st
-from dotenv import load_dotenv
-load_dotenv()
 import time
 import os
 import json
@@ -131,6 +129,120 @@ st.session_state.messages = st.session_state.memory.load_chat_history(st.session
 # Run LocalStorage Manager
 local_storage_manager()
 
+# Header
+col1, col2 = st.columns([1, 12])
+with col1:
+    st.image("https://cdn-icons-png.flaticon.com/512/2083/2083213.png", width=50)
+with col2:
+    st.title("CoderLang Universal Engine")
+    st.caption("Hyper-fast Async Agent Pipeline powered by Gemini 2.5 Flash & 3 Pro")
+
+# Sidebar
+with st.sidebar:
+    st.header("🧠 Memory Context")
+    if st.button("➕ New Chat", use_container_width=True):
+        new_id = st.session_state.memory.create_chat_session()
+        st.session_state.current_chat_id = new_id
+        # Clear workflow session on new chat
+        if "workflow_session" in st.session_state:
+            del st.session_state.workflow_session
+        st.rerun()
+
+    st.divider()
+    st.subheader("Past Chats")
+    sessions = st.session_state.memory.list_chat_sessions()
+    for session in sessions:
+        label = session["title"]
+        if session["id"] == st.session_state.current_chat_id:
+            label = f"🔹 {label}"
+        if st.button(label, key=session["id"], use_container_width=True):
+            st.session_state.current_chat_id = session["id"]
+            # Clear workflow session when switching chats
+            if "workflow_session" in st.session_state:
+                del st.session_state.workflow_session
+            st.rerun()
+
+    st.divider()
+    
+    # --- REPO IMPORT (Paperclip Functionality) ---
+    with st.expander("📎 Import Repository"):
+        repo_url = st.text_input("Git Repo URL", key="repo_url_input")
+        if st.button("Fetch Repo", key="fetch_repo_btn"):
+            with st.spinner("Fetching repository..."):
+                from utils.repo_loader import RepoLoader
+                loader = RepoLoader()
+                path, err = loader.fetch_repo(repo_url)
+                if path:
+                    st.session_state.repo_path = path
+                    st.session_state.repo_files = loader.get_file_tree(path)
+                    st.success("Repo fetched!")
+                else:
+                    st.error(f"Failed: {err}")
+        
+        if "repo_files" in st.session_state:
+            selected_files = st.multiselect("Select Files", st.session_state.repo_files)
+            analysis_goal = st.selectbox("Goal", [
+                "Explain Codebase",
+                "Refactor Code",
+                "Find Bugs",
+                "Add Comments",
+                "Convert to Python",
+                "Extend Functionality"
+            ])
+            custom_goal = st.text_input("Custom Goal")
+            
+            if st.button("Analyze", type="primary"):
+                if not selected_files:
+                    st.warning("Select files first.")
+                else:
+                    from utils.repo_loader import RepoLoader
+                    loader = RepoLoader()
+                    context = ""
+                    for f in selected_files:
+                        content = loader.read_file(st.session_state.repo_path, f)
+                        context += f"\n--- FILE: {f} ---\n{content}\n"
+                    
+                    final_goal = custom_goal if custom_goal else analysis_goal
+                    full_prompt = f"Analyze the following repository files.\nGOAL: {final_goal}\n\nCONTEXT:\n{context}"
+                    process_prompt(full_prompt)
+
+    # --- SETTINGS ---
+    with st.expander("⚙️ Settings"):
+        st.subheader("Data Management")
+        # Export
+        if st.button("Export Memory Dump"):
+            dump = st.session_state.memory.get_full_memory_dump()
+            st.download_button(
+                label="Download JSON",
+                data=json.dumps(dump, indent=2),
+                file_name=f"coderlang_memory_{int(time.time())}.json",
+                mime="application/json"
+            )
+        
+        # Import
+        uploaded_file = st.file_uploader("Import Chat", type=["json"])
+        if uploaded_file is not None:
+            try:
+                content = json.load(uploaded_file)
+                success, msg = st.session_state.memory.import_chat_session(content)
+                if success:
+                    st.success(msg)
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(msg)
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+        
+        st.divider()
+        if st.button("Clear Session Memory"):
+            st.session_state.memory._init_file(st.session_state.memory.short_term_path)
+            st.toast("Memory cleared!", icon="🧹")
+        
+        st.info("**Configuration:**\n- Router: Gemini 2.5 Flash\n- Coding: Gemini 3 Pro Preview")
+
+# --- CHAT INTERFACE ---
+
 def render_message_content(summary, raw, key_suffix=""):
     if summary.get("generated_code"):
         task_type = summary.get("intent", "General Task")
@@ -201,123 +313,6 @@ def process_prompt(prompt, is_refinement=False):
     
     st.rerun()
 
-# Header
-col1, col2 = st.columns([1, 12])
-with col1:
-    st.image("https://cdn-icons-png.flaticon.com/512/2083/2083213.png", width=50)
-with col2:
-    st.title("CoderLang Universal Engine")
-    st.caption("Hyper-fast Async Agent Pipeline powered by Gemini 2.5 Flash & 3 Pro")
-
-# Sidebar
-with st.sidebar:
-    st.header("🧠 Memory Context")
-    if st.button("➕ New Chat", use_container_width=True):
-        new_id = st.session_state.memory.create_chat_session()
-        st.session_state.current_chat_id = new_id
-        # Clear workflow session on new chat
-        if "workflow_session" in st.session_state:
-            del st.session_state.workflow_session
-        st.rerun()
-
-    st.divider()
-    st.subheader("Past Chats")
-    sessions = st.session_state.memory.list_chat_sessions()
-    for session in sessions:
-        label = session["title"]
-        if session["id"] == st.session_state.current_chat_id:
-            label = f"🔹 {label}"
-        if st.button(label, key=session["id"], use_container_width=True):
-            st.session_state.current_chat_id = session["id"]
-            # Clear workflow session when switching chats
-            if "workflow_session" in st.session_state:
-                del st.session_state.workflow_session
-            st.rerun()
-
-    st.divider()
-    
-    # --- REPO IMPORT (Paperclip Functionality) ---
-    with st.expander("📎 Import Repository"):
-        def on_repo_url_change():
-            if st.session_state.repo_url_input:
-                with st.spinner("Fetching repository..."):
-                    from utils.repo_loader import RepoLoader
-                    loader = RepoLoader()
-                    path, err = loader.fetch_repo(st.session_state.repo_url_input)
-                    if path:
-                        st.session_state.repo_path = path
-                        st.session_state.repo_files = loader.get_file_tree(path)
-                        st.success("Repo fetched!")
-                    else:
-                        st.error(f"Failed: {err}")
-
-        repo_url = st.text_input("Git Repo URL", key="repo_url_input", on_change=on_repo_url_change)
-        if st.button("Fetch Repo", key="fetch_repo_btn"):
-             # Trigger manual fetch if button clicked
-             on_repo_url_change()
-        
-        if "repo_files" in st.session_state:
-            st.info(f"✅ Loaded {len(st.session_state.repo_files)} files.")
-
-            analysis_goal = st.selectbox("Goal", [
-                "Explain Codebase",
-                "Refactor Code",
-                "Find Bugs",
-                "Add Comments",
-                "Convert to Python",
-                "Extend Functionality"
-            ])
-            custom_goal = st.text_input("Custom Goal")
-            
-            if st.button("Analyze", type="primary"):
-                from utils.repo_loader import RepoLoader
-                loader = RepoLoader()
-                context = ""
-                for f in st.session_state.repo_files:
-                    content = loader.read_file(st.session_state.repo_path, f)
-                    context += f"\n--- FILE: {f} ---\n{content}\n"
-                
-                final_goal = custom_goal if custom_goal else analysis_goal
-                full_prompt = f"Analyze the following repository files.\nGOAL: {final_goal}\n\nCONTEXT:\n{context}"
-                process_prompt(full_prompt)
-
-    # --- SETTINGS ---
-    with st.expander("⚙️ Settings"):
-        st.subheader("Data Management")
-        # Export
-        if st.button("Export Memory Dump"):
-            dump = st.session_state.memory.get_full_memory_dump()
-            st.download_button(
-                label="Download JSON",
-                data=json.dumps(dump, indent=2),
-                file_name=f"coderlang_memory_{int(time.time())}.json",
-                mime="application/json"
-            )
-        
-        # Import
-        uploaded_file = st.file_uploader("Import Chat", type=["json"])
-        if uploaded_file is not None:
-            try:
-                content = json.load(uploaded_file)
-                success, msg = st.session_state.memory.import_chat_session(content)
-                if success:
-                    st.success(msg)
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error(msg)
-            except Exception as e:
-                st.error(f"Import failed: {e}")
-        
-        st.divider()
-        if st.button("Clear Session Memory"):
-            st.session_state.memory._init_file(st.session_state.memory.short_term_path)
-            st.toast("Memory cleared!", icon="🧹")
-        
-        st.info("**Configuration:**\n- Router: Gemini 2.5 Flash\n- Coding: Gemini 3 Pro Preview")
-
-# --- CHAT INTERFACE ---
-
 # Display History
 # Header Actions
 c_head, c_act = st.columns([10, 2])
@@ -343,10 +338,6 @@ for i, message in enumerate(st.session_state.messages):
             st.markdown(message["content"])
 
 # --- WORKFLOW EXECUTION LOOP ---
-if "workflow_session" not in st.session_state: # Only run if no workflow is active
-    # This is where the chat input would normally be
-    pass
-
 if "workflow_session" in st.session_state:
     session = st.session_state.workflow_session
     

@@ -32,12 +32,23 @@ class RepoLoader:
         # Clean existing
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
+
+        # Get Token
+        github_token = os.environ.get("GITHUB_TOKEN")
+        
+        # Prepare Auth URL for Git
+        auth_repo_url = repo_url
+        if github_token:
+            # Inject token: https://oauth2:TOKEN@github.com/...
+            if "https://" in repo_url:
+                auth_repo_url = repo_url.replace("https://", f"https://oauth2:{github_token}@")
             
         # Method 1: Try Git Clone
         git_error = None
         try:
+            # Use auth_repo_url for cloning, but don't log it to avoid leaking secrets
             result = subprocess.run(
-                ["git", "clone", "--depth", "1", repo_url, target_dir], 
+                ["git", "clone", "--depth", "1", auth_repo_url, target_dir], 
                 check=True, 
                 capture_output=True,
                 text=True
@@ -48,7 +59,9 @@ class RepoLoader:
             git_error = "Git is not installed in the container"
             log.warning(f"{git_error}. Falling back to ZIP download.")
         except subprocess.CalledProcessError as e:
-            git_error = f"Git clone failed: {e.stderr}"
+            # Redact token from error message
+            safe_stderr = e.stderr.replace(github_token, "***") if github_token else e.stderr
+            git_error = f"Git clone failed: {safe_stderr}"
             log.warning(f"{git_error}. Falling back to ZIP download.")
             
         # Method 2: ZIP Download (Fallback)
@@ -64,11 +77,15 @@ class RepoLoader:
             branches = ["main", "master", "dev", "develop", "trunk"]
             last_error = None
             
+            headers = {}
+            if github_token:
+                headers["Authorization"] = f"token {github_token}"
+            
             for branch in branches:
                 zip_url = f"{base_url}/archive/refs/heads/{branch}.zip"
                 try:
                     log.info(f"Attempting to download from {zip_url}")
-                    r = requests.get(zip_url, timeout=15)
+                    r = requests.get(zip_url, timeout=15, headers=headers)
                     if r.status_code == 200:
                         z = zipfile.ZipFile(io.BytesIO(r.content))
                         z.extractall(self.cache_dir)
